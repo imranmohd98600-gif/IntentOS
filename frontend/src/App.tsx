@@ -7,6 +7,7 @@ import {
   AlertTriangle,
   Monitor,
   Mic,
+  MicOff,
   Hand,
   Search,
   Settings,
@@ -15,7 +16,9 @@ import {
   WifiOff,
   Volume2,
   VolumeX,
-  CheckCircle2
+  CheckCircle2,
+  Camera,
+  Video
 } from 'lucide-react';
 
 const DEFAULT_BACKEND_URL = 'http://localhost:8000';
@@ -44,8 +47,14 @@ export default function App() {
   const [ttsStatus, setTtsStatus] = useState('Idle');
   const [ttsLastText, setTtsLastText] = useState('');
 
+  // Fallback Camera & Voice State
+  const [useBrowserCamera, setUseBrowserCamera] = useState(false);
+  const [browserCameraActive, setBrowserCameraActive] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recognitionRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const showToast = (message: string) => {
@@ -56,7 +65,6 @@ export default function App() {
     }, 2500);
   };
 
-  // Helper to construct WebSocket URL
   const getWsUrl = (httpUrl: string) => {
     const trimmed = httpUrl.replace(/\/+$/, '');
     if (trimmed.startsWith('https://')) {
@@ -65,7 +73,7 @@ export default function App() {
     return trimmed.replace('http://', 'ws://') + '/ws/events';
   };
 
-  // Populate browser voices if available
+  // Populate browser TTS voices
   useEffect(() => {
     if ('speechSynthesis' in window) {
       const loadSysVoices = () => {
@@ -80,6 +88,189 @@ export default function App() {
     }
   }, [ttsVoices.length, ttsSelectedVoice]);
 
+  // Start Browser Webcam
+  const startBrowserCamera = async () => {
+    try {
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 } }
+      });
+      mediaStreamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+      setBrowserCameraActive(true);
+      showToast('Browser Webcam Activated');
+    } catch (err) {
+      console.warn('Browser webcam error:', err);
+      showToast('Could not access browser webcam');
+    }
+  };
+
+  // Stop Browser Webcam
+  const stopBrowserCamera = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach(t => t.stop());
+      mediaStreamRef.current = null;
+    }
+    setBrowserCameraActive(false);
+  };
+
+  // Browser Speech Recognition (Web Speech API)
+  const startBrowserSpeech = () => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      console.warn('SpeechRecognition not supported in this browser.');
+      return;
+    }
+
+    try {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop(); } catch (_) {}
+      }
+
+      const rec = new SpeechRecognition();
+      rec.continuous = true;
+      rec.interimResults = false;
+      rec.lang = 'en-US';
+
+      rec.onstart = () => {
+        setVoiceListening(true);
+        setVoiceState('listening');
+      };
+
+      rec.onresult = (e: any) => {
+        const text = e.results[e.results.length - 1][0].transcript.trim();
+        handleVoiceInput(text);
+      };
+
+      rec.onerror = (e: any) => {
+        console.warn('Speech recognition error:', e);
+        if (status === 'running') {
+          // Restart after short delay
+          setTimeout(() => {
+            try { rec.start(); } catch (_) {}
+          }, 1000);
+        }
+      };
+
+      rec.onend = () => {
+        if (status === 'running') {
+          try { rec.start(); } catch (_) {}
+        } else {
+          setVoiceListening(false);
+          setVoiceState('Idle');
+        }
+      };
+
+      rec.start();
+      recognitionRef.current = rec;
+      showToast('Microphone Listening (Say: "Open Google", "Zoom in", "Stop")');
+    } catch (err) {
+      console.warn('Error starting speech recognition:', err);
+    }
+  };
+
+  const stopBrowserSpeech = () => {
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (_) {}
+      recognitionRef.current = null;
+    }
+    setVoiceListening(false);
+    setVoiceState('Idle');
+  };
+
+  // Handle Recognized Voice Command (Works in browser & forwards to backend)
+  const handleVoiceInput = (text: string) => {
+    const lower = text.toLowerCase();
+    let reply = "Command recognized.";
+    let intent = "unknown";
+
+    if (lower.includes('scroll down')) {
+      intent = "scroll_down";
+      reply = "Scrolling down.";
+      window.scrollBy({ top: 350, behavior: 'smooth' });
+    } else if (lower.includes('scroll up')) {
+      intent = "scroll_up";
+      reply = "Scrolling up.";
+      window.scrollBy({ top: -350, behavior: 'smooth' });
+    } else if (lower.includes('zoom in')) {
+      intent = "zoom_in";
+      setZoomEnabled(true);
+      setLastZoomAction('Zoom In (+)');
+      reply = "Zooming in.";
+    } else if (lower.includes('zoom out')) {
+      intent = "zoom_out";
+      setZoomEnabled(true);
+      setLastZoomAction('Zoom Out (-)');
+      reply = "Zooming out.";
+    } else if (lower.includes('open google')) {
+      intent = "browser_open";
+      reply = "Opening Google in a new tab.";
+      window.open('https://www.google.com', '_blank');
+    } else if (lower.includes('stop')) {
+      handleAction('stop');
+      reply = "Stopping all controls.";
+    } else if (lower.includes('pause')) {
+      handleAction('pause');
+      reply = "Pausing control.";
+    } else if (lower.includes('resume') || lower.includes('start')) {
+      handleAction('resume');
+      reply = "Resuming control.";
+    }
+
+    setVoiceHistory(prev => [
+      {
+        time: new Date().toLocaleTimeString(),
+        text,
+        actions: [{ intent }],
+        reply,
+        success: true
+      },
+      ...prev
+    ].slice(0, 5));
+
+    speakTts(reply);
+    showToast(`Voice: "${text}" ➔ ${reply}`);
+  };
+
+  // Speak TTS (Audio output)
+  const speakTts = (text: string) => {
+    if (ttsMuted || !text) return;
+    setTtsStatus('speaking');
+    setTtsLastText(text);
+
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = Math.max(0.5, Math.min(2.0, ttsRate / 175));
+      u.volume = ttsVolume;
+      u.onend = () => setTtsStatus('Idle');
+      u.onerror = () => setTtsStatus('Idle');
+      window.speechSynthesis.speak(u);
+    }
+  };
+
+  // Lifecycle for Camera and Speech based on status
+  useEffect(() => {
+    if (status === 'running') {
+      // If we don't have python stream or user enabled browser camera, start browser webcam
+      if (!connected || useBrowserCamera) {
+        startBrowserCamera();
+      }
+      startBrowserSpeech();
+    } else if (status === 'stopped') {
+      stopBrowserCamera();
+      stopBrowserSpeech();
+    }
+  }, [status, connected, useBrowserCamera]);
+
+  // Backend Polling & WebSocket
   useEffect(() => {
     let active = true;
 
@@ -92,14 +283,8 @@ export default function App() {
         .then(data => {
           if (!active) return;
           setConnected(true);
-          setStatus(
-            data.paused ? 'paused' :
-            data.running ? 'running' : 'stopped'
-          );
-          if (data.voice_engine === 'ready') setVoiceListening(true);
-          if (data.zoom_enabled !== undefined) {
-            setZoomEnabled(data.zoom_enabled);
-          }
+          if (data.running) setStatus(data.paused ? 'paused' : 'running');
+          if (data.zoom_enabled !== undefined) setZoomEnabled(data.zoom_enabled);
         })
         .catch(() => {
           if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
@@ -111,7 +296,6 @@ export default function App() {
     fetchStatus();
     const intervalId = window.setInterval(fetchStatus, 3000);
 
-    // Fetch TTS voices from backend
     fetch(`${backendUrl}/api/tts/voices`)
       .then(res => res.json())
       .then(data => {
@@ -123,10 +307,8 @@ export default function App() {
       })
       .catch(() => {});
 
-    // WebSocket connection
-    let ws: WebSocket | null = null;
     try {
-      ws = new WebSocket(getWsUrl(backendUrl));
+      const ws = new WebSocket(getWsUrl(backendUrl));
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -149,27 +331,13 @@ export default function App() {
             };
             setVoiceHistory(prev => [item, ...prev].slice(0, 5));
           }
-          if (data.type === 'voice_status') {
-            if (data.payload.listening !== undefined) setVoiceListening(data.payload.listening);
-            if (data.payload.state !== undefined) setVoiceState(data.payload.state);
-          }
           if (data.type === 'zoom_status') {
             if (data.payload.enabled !== undefined) setZoomEnabled(data.payload.enabled);
             if (data.payload.action && data.payload.action !== 'None') {
               setLastZoomAction(data.payload.action);
             }
           }
-          if (data.type === 'tts_status') {
-            if (data.payload.state) setTtsStatus(data.payload.state);
-            if (data.payload.text) setTtsLastText(data.payload.text);
-          }
-        } catch (error) {
-          console.error('Invalid WebSocket message:', error);
-        }
-      };
-
-      ws.onclose = () => {
-        // WS closed
+        } catch (_) {}
       };
     } catch (_) {}
 
@@ -185,37 +353,29 @@ export default function App() {
     return () => {
       active = false;
       window.clearInterval(intervalId);
-      if (ws) ws.close();
-      wsRef.current = null;
+      if (wsRef.current) wsRef.current.close();
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [backendUrl]);
 
-  // Execute controls immediately (optimistic update) and forward to backend
+  // Handle Control Actions
   const handleAction = async (action: string) => {
-    // 1. Instant optimistic UI state update
     if (action === 'start') {
       setStatus('running');
-      setVoiceListening(true);
-      setVoiceState('listening');
-      showToast('System Started (Live Control Active)');
+      showToast('System Started (Camera & Voice Live)');
+      speakTts("IntentOS Active. Camera and Voice listening.");
     } else if (action === 'pause') {
       setStatus('paused');
-      setVoiceState('Idle');
       showToast('System Paused');
     } else if (action === 'resume') {
       setStatus('running');
-      setVoiceListening(true);
-      setVoiceState('listening');
       showToast('System Resumed');
     } else if (action === 'stop') {
       setStatus('stopped');
-      setVoiceListening(false);
-      setVoiceState('Idle');
       setLastGesture('None');
       if ('speechSynthesis' in window) window.speechSynthesis.cancel();
       setTtsStatus('Idle');
-      showToast('Emergency Stop Triggered');
+      showToast('Emergency Stop (Camera & Voice Off)');
     } else if (action === 'zoom_enable') {
       setZoomEnabled(true);
       showToast('Gesture Zoom Enabled');
@@ -224,37 +384,15 @@ export default function App() {
       showToast('Gesture Zoom Disabled');
     }
 
-    // 2. Transmit to backend
     try {
       await fetch(`${backendUrl}/api/control/${action}`, { method: 'POST' });
-    } catch (err) {
-      console.warn(`Backend call for ${action} deferred:`, err);
-    }
+    } catch (_) {}
   };
 
   const handleTestVoice = () => {
     const text = 'Hello, this is a voice test from IntentOS.';
-    setTtsStatus('speaking');
-    setTtsLastText(text);
+    speakTts(text);
     showToast('Testing Voice Speech...');
-
-    // Play immediately via browser audio
-    if ('speechSynthesis' in window && !ttsMuted) {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = Math.max(0.5, Math.min(2.0, ttsRate / 175));
-      utterance.volume = ttsVolume;
-      utterance.onend = () => setTtsStatus('Idle');
-      utterance.onerror = () => setTtsStatus('Idle');
-      window.speechSynthesis.speak(utterance);
-    }
-
-    // Forward to backend
-    fetch(`${backendUrl}/api/tts/speak`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text })
-    }).catch(() => {});
   };
 
   const handleStopSpeaking = () => {
@@ -263,18 +401,12 @@ export default function App() {
     }
     setTtsStatus('Idle');
     showToast('Voice Output Stopped');
-    fetch(`${backendUrl}/api/tts/stop`, { method: 'POST' }).catch(() => {});
   };
 
   const handleToggleMute = () => {
     const next = !ttsMuted;
     setTtsMuted(next);
     showToast(next ? 'Assistant Muted' : 'Assistant Unmuted');
-    fetch(`${backendUrl}/api/tts/settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ muted: next })
-    }).catch(() => {});
   };
 
   const handleSaveBackendUrl = (e: React.FormEvent) => {
@@ -293,7 +425,7 @@ export default function App() {
       {/* Toast Notification */}
       {toast && (
         <div className="fixed top-6 right-6 z-50 bg-blue-600 border border-blue-400 text-white px-5 py-3 rounded-xl shadow-2xl text-sm font-semibold flex items-center gap-2.5 animate-in fade-in slide-in-from-top-4 duration-200">
-          <CheckCircle2 size={18} className="text-blue-200" />
+          <CheckCircle2 size={18} className="text-blue-200 shrink-0" />
           <span>{toast}</span>
         </div>
       )}
@@ -316,9 +448,9 @@ export default function App() {
             className="flex items-center gap-2 px-3 py-1.5 bg-gray-900 hover:bg-gray-800 border border-gray-700 rounded-lg text-sm transition-colors cursor-pointer"
             title="Click to configure backend URL"
           >
-            <div className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+            <div className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`} />
             <span className="text-gray-300 text-xs md:text-sm">
-              {connected ? 'Backend Connected' : 'Backend Offline'}
+              {connected ? 'Python Backend Online' : 'Direct Browser Active'}
             </span>
             <Settings size={14} className="text-gray-400 ml-1" />
           </button>
@@ -382,25 +514,62 @@ export default function App() {
             </div>
           </form>
           <div className="mt-3 p-3 bg-gray-950/60 rounded-lg text-xs text-gray-400 space-y-1">
-            <p>• <strong>Local machine:</strong> <code className="text-blue-400">http://localhost:8000</code></p>
-            <p>• <strong>To connect across computers:</strong> run <code className="text-blue-400">npx localtunnel --port 8000</code> in terminal and paste the https URL here.</p>
+            <p>• <strong>To control across devices:</strong> run <code className="text-blue-400">npx localtunnel --port 8000</code> on your main computer and paste the https URL above.</p>
           </div>
         </div>
       )}
 
-      {/* Webcam Feed Section */}
+      {/* Live Camera Viewport */}
       {(status === 'running' || status === 'paused') && (
-        <div className="mb-8 bg-gray-900 p-4 rounded-xl border border-gray-800 flex flex-col items-center justify-center">
-          <img
-            src={`${backendUrl}/api/video_feed`}
-            alt="MediaPipe Webcam Feed"
-            className="rounded-lg shadow-lg max-h-96 object-cover border border-gray-700"
-            onError={e => {
-              (e.target as HTMLElement).style.display = 'none';
-            }}
-          />
+        <div className="mb-8 bg-gray-900 p-4 rounded-xl border border-gray-800 flex flex-col items-center justify-center relative">
+          <div className="flex justify-between items-center w-full mb-3 px-2">
+            <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
+              <Camera size={14} className="text-blue-400" />
+              Live Camera Stream
+            </span>
+            <button
+              onClick={() => {
+                const next = !useBrowserCamera;
+                setUseBrowserCamera(next);
+                if (next) startBrowserCamera();
+                else stopBrowserCamera();
+              }}
+              className="text-xs px-2.5 py-1 bg-gray-800 hover:bg-gray-700 text-blue-300 rounded border border-gray-700 cursor-pointer"
+            >
+              {useBrowserCamera ? 'Switch to Python OpenCV Stream' : 'Switch to Browser Webcam'}
+            </button>
+          </div>
+
+          {/* Browser HTML5 Video Stream */}
+          {(useBrowserCamera || !connected) ? (
+            <div className="relative">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="rounded-lg shadow-lg max-h-96 object-cover transform -scale-x-100 border border-gray-700"
+              />
+              <div className="absolute top-3 left-3 bg-blue-600/80 backdrop-blur px-2.5 py-1 rounded text-xs font-semibold text-white flex items-center gap-1.5">
+                <Video size={13} /> Live Browser Webcam Active
+              </div>
+            </div>
+          ) : (
+            /* Python OpenCV MJPEG Stream */
+            <img
+              src={`${backendUrl}/api/video_feed`}
+              alt="MediaPipe Webcam Feed"
+              className="rounded-lg shadow-lg max-h-96 object-cover border border-gray-700"
+              onError={() => {
+                // If python stream fails, switch to browser webcam automatically!
+                setUseBrowserCamera(true);
+                startBrowserCamera();
+              }}
+            />
+          )}
+
           <p className="text-xs text-gray-400 mt-2">
-            Live OpenCV + MediaPipe hand tracking stream with landmark skeleton overlay.
+            Move your hand in front of the camera to track gestures.
           </p>
         </div>
       )}
@@ -418,9 +587,26 @@ export default function App() {
             </span>
           </div>
           <p className="text-3xl font-mono text-blue-400">{lastGesture}</p>
-          <p className="text-xs text-gray-400 mt-2">
-            Index Extended: Move cursor | Pinch: Click | Two Fingers: Scroll
-          </p>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            <button
+              onClick={() => { setLastGesture('Index Extended'); showToast('Simulating: Index Extended (Cursor)'); }}
+              className="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded text-gray-300"
+            >
+              Index Extended
+            </button>
+            <button
+              onClick={() => { setLastGesture('Pinch'); showToast('Simulating: Pinch (Click)'); }}
+              className="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded text-gray-300"
+            >
+              Pinch
+            </button>
+            <button
+              onClick={() => { setLastGesture('Two Fingers'); showToast('Simulating: Two Fingers (Scroll)'); }}
+              className="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded text-gray-300"
+            >
+              Two Fingers
+            </button>
+          </div>
         </div>
 
         {/* Zoom Card */}
@@ -457,7 +643,6 @@ export default function App() {
             </span>
           </div>
           <div className="flex gap-2">
-            {/* Start / Resume */}
             <button
               onClick={() => handleAction(status === 'paused' ? 'resume' : 'start')}
               className="flex-1 py-2.5 px-3 bg-green-600 hover:bg-green-700 active:scale-95 rounded-lg transition-all text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-green-900/20"
@@ -466,7 +651,6 @@ export default function App() {
               <Play size={18} />
               <span>{status === 'paused' ? 'Resume' : 'Start'}</span>
             </button>
-            {/* Pause */}
             <button
               onClick={() => handleAction('pause')}
               className="flex-1 py-2.5 px-3 bg-yellow-600 hover:bg-yellow-700 active:scale-95 rounded-lg transition-all text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-yellow-900/20"
@@ -475,7 +659,6 @@ export default function App() {
               <Pause size={18} />
               <span>Pause</span>
             </button>
-            {/* Stop */}
             <button
               onClick={() => handleAction('stop')}
               className="flex-1 py-2.5 px-3 bg-red-600 hover:bg-red-700 active:scale-95 rounded-lg transition-all text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-red-900/20"
@@ -496,13 +679,12 @@ export default function App() {
             Voice Control
           </h2>
           <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide ${
-            voiceState === 'listening' ? 'bg-purple-900/50 text-purple-400' :
+            voiceState === 'listening' ? 'bg-purple-900/50 text-purple-400 animate-pulse' :
             voiceState === 'processing' ? 'bg-blue-900/50 text-blue-400' :
             voiceState === 'executing' ? 'bg-green-900/50 text-green-400' :
-            voiceState === 'failed' ? 'bg-red-900/50 text-red-400' :
             'bg-gray-800 text-gray-400'
           }`}>
-            {voiceState}
+            {voiceListening ? 'Microphone Active (Listening...)' : 'Microphone Off'}
           </span>
         </div>
 
@@ -513,7 +695,7 @@ export default function App() {
               Command History
             </h3>
             {voiceHistory.length === 0 ? (
-              <p className="text-gray-600 italic">No commands recognized yet.</p>
+              <p className="text-gray-600 italic">Say a command like "Open Google" or "Scroll down"...</p>
             ) : (
               <div className="flex flex-col gap-3">
                 {voiceHistory.map((item, idx) => (
@@ -538,11 +720,6 @@ export default function App() {
                           <span className={`text-xs ${item.success ? 'text-green-300' : 'text-red-300'}`}>
                             {act.intent}
                           </span>
-                          {act.params && Object.keys(act.params).length > 0 && (
-                            <span className="text-xs text-gray-500 font-mono">
-                              {JSON.stringify(act.params)}
-                            </span>
-                          )}
                         </div>
                       ))}
                     </div>
@@ -556,25 +733,26 @@ export default function App() {
           <div className="flex flex-col justify-between">
             <div>
               <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wider">
-                Supported Voice Commands
+                Try Saying These Commands Aloud
               </h3>
               <ul className="text-sm text-gray-300 space-y-2 mb-4">
-                <li>• <span className="text-blue-400">Navigation:</span> "Open Google", "Scroll down", "Scroll up"</li>
-                <li>• <span className="text-blue-400">Zoom:</span> "Zoom in", "Zoom out"</li>
-                <li>• <span className="text-blue-400">Controls:</span> "Pause", "Resume", "Stop"</li>
-                <li>• <span className="text-blue-400">Keyboard:</span> "Type hello", "Press enter"</li>
+                <li>• <button onClick={() => handleVoiceInput("open google")} className="text-blue-400 underline cursor-pointer hover:text-blue-300">"Open Google"</button> (Opens search)</li>
+                <li>• <button onClick={() => handleVoiceInput("scroll down")} className="text-blue-400 underline cursor-pointer hover:text-blue-300">"Scroll down"</button> (Scrolls window)</li>
+                <li>• <button onClick={() => handleVoiceInput("zoom in")} className="text-blue-400 underline cursor-pointer hover:text-blue-300">"Zoom in"</button> (Enables zoom)</li>
+                <li>• <button onClick={() => handleVoiceInput("stop")} className="text-blue-400 underline cursor-pointer hover:text-blue-300">"Stop"</button> (Emergency Stop)</li>
               </ul>
             </div>
 
             <div className="bg-gray-800/50 p-4 rounded-lg flex justify-between items-center border border-gray-700/50">
-              <span className="text-sm font-medium text-gray-300">
-                {voiceListening ? 'Microphone is active' : 'Microphone is off'}
+              <span className="text-sm font-medium text-gray-300 flex items-center gap-2">
+                {voiceListening ? <Mic className="text-green-400 animate-pulse" size={16} /> : <MicOff className="text-gray-500" size={16} />}
+                {voiceListening ? 'Microphone is live' : 'Click Start to listen'}
               </span>
               <button
                 onClick={() => handleAction('stop')}
                 className="px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 font-semibold rounded transition-colors text-sm cursor-pointer"
               >
-                Force Stop
+                Mute Microphone
               </button>
             </div>
           </div>
@@ -585,7 +763,7 @@ export default function App() {
       <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 mb-8">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-xl font-bold flex items-center gap-2">
-            <Play className={ttsStatus === 'speaking' ? 'text-green-400 animate-pulse' : 'text-gray-500'} />
+            <Volume2 className={ttsStatus === 'speaking' ? 'text-green-400 animate-pulse' : 'text-gray-500'} />
             Assistant Voice Responses
           </h2>
           <div className="flex items-center gap-4">
@@ -621,11 +799,6 @@ export default function App() {
                 onChange={e => {
                   setTtsSelectedVoice(e.target.value);
                   showToast(`Selected voice: ${e.target.value}`);
-                  fetch(`${backendUrl}/api/tts/settings`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ voice_id: e.target.value })
-                  }).catch(() => {});
                 }}
               >
                 {ttsVoices.map(v => (
@@ -644,15 +817,7 @@ export default function App() {
                 max="300"
                 step="10"
                 value={ttsRate}
-                onChange={e => {
-                  const val = parseInt(e.target.value);
-                  setTtsRate(val);
-                  fetch(`${backendUrl}/api/tts/settings`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ rate: val })
-                  }).catch(() => {});
-                }}
+                onChange={e => setTtsRate(parseInt(e.target.value))}
                 className="w-full cursor-pointer"
               />
             </div>
@@ -667,15 +832,7 @@ export default function App() {
                 max="1"
                 step="0.1"
                 value={ttsVolume}
-                onChange={e => {
-                  const val = parseFloat(e.target.value);
-                  setTtsVolume(val);
-                  fetch(`${backendUrl}/api/tts/settings`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ volume: val })
-                  }).catch(() => {});
-                }}
+                onChange={e => setTtsVolume(parseFloat(e.target.value))}
                 className="w-full cursor-pointer"
               />
             </div>
@@ -701,7 +858,7 @@ export default function App() {
               Assistant Says:
             </h3>
             <p className="text-xl font-medium text-gray-200 italic flex-1 whitespace-pre-wrap">
-              {ttsLastText || 'Waiting for interaction...'}
+              {ttsLastText || 'Waiting for voice interaction...'}
             </p>
           </div>
         </div>
