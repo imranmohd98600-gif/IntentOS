@@ -21,14 +21,17 @@ export default function App() {
 
   useEffect(() => {
     // Fetch initial status
-    fetch('http://localhost:8000/api/status')
-      .then(res => res.json())
-      .then(data => {
-        setStatus(data.paused ? 'paused' : (data.running ? 'running' : 'stopped'));
-        if (data.voice_engine === 'ready') setVoiceListening(true);
-        if (data.zoom_enabled !== undefined) setZoomEnabled(data.zoom_enabled);
+   
+    // Check the hosted backend health
+    fetch('https://intentos-1-whlm.onrender.com/api/status')
+      .then(res => {
+        if (!res.ok) throw new Error('Backend health check failed');
+        return res.json();
       })
-      .catch(console.error);
+      .then(data => {
+        setConnected(data.status === 'connected');
+      })
+      .catch(() => setConnected(false));
 
     fetch('http://localhost:8000/api/tts/voices')
       .then(res => res.json())
