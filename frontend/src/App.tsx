@@ -12,7 +12,10 @@ import {
   Settings,
   RefreshCw,
   Wifi,
-  WifiOff
+  WifiOff,
+  Volume2,
+  VolumeX,
+  CheckCircle2
 } from 'lucide-react';
 
 const DEFAULT_BACKEND_URL = 'http://localhost:8000';
@@ -41,7 +44,17 @@ export default function App() {
   const [ttsStatus, setTtsStatus] = useState('Idle');
   const [ttsLastText, setTtsLastText] = useState('');
 
+  const [toast, setToast] = useState<string | null>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
+
+  const showToast = (message: string) => {
+    setToast(message);
+    window.clearTimeout((window as any)._toastTimeout);
+    (window as any)._toastTimeout = window.setTimeout(() => {
+      setToast(null);
+    }, 2500);
+  };
 
   // Helper to construct WebSocket URL
   const getWsUrl = (httpUrl: string) => {
@@ -51,6 +64,21 @@ export default function App() {
     }
     return trimmed.replace('http://', 'ws://') + '/ws/events';
   };
+
+  // Populate browser voices if available
+  useEffect(() => {
+    if ('speechSynthesis' in window) {
+      const loadSysVoices = () => {
+        const v = window.speechSynthesis.getVoices();
+        if (v.length > 0 && ttsVoices.length === 0) {
+          setTtsVoices(v.map(voice => ({ id: voice.name, name: voice.name })));
+          if (!ttsSelectedVoice) setTtsSelectedVoice(v[0].name);
+        }
+      };
+      loadSysVoices();
+      window.speechSynthesis.onvoiceschanged = loadSysVoices;
+    }
+  }, [ttsVoices.length, ttsSelectedVoice]);
 
   useEffect(() => {
     let active = true;
@@ -148,8 +176,7 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        fetch(`${backendUrl}/api/control/stop`, { method: 'POST' }).catch(() => {});
-        setStatus('stopped');
+        handleAction('stop');
       }
     };
 
@@ -164,28 +191,90 @@ export default function App() {
     };
   }, [backendUrl]);
 
+  // Execute controls immediately (optimistic update) and forward to backend
   const handleAction = async (action: string) => {
+    // 1. Instant optimistic UI state update
+    if (action === 'start') {
+      setStatus('running');
+      setVoiceListening(true);
+      setVoiceState('listening');
+      showToast('System Started (Live Control Active)');
+    } else if (action === 'pause') {
+      setStatus('paused');
+      setVoiceState('Idle');
+      showToast('System Paused');
+    } else if (action === 'resume') {
+      setStatus('running');
+      setVoiceListening(true);
+      setVoiceState('listening');
+      showToast('System Resumed');
+    } else if (action === 'stop') {
+      setStatus('stopped');
+      setVoiceListening(false);
+      setVoiceState('Idle');
+      setLastGesture('None');
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+      setTtsStatus('Idle');
+      showToast('Emergency Stop Triggered');
+    } else if (action === 'zoom_enable') {
+      setZoomEnabled(true);
+      showToast('Gesture Zoom Enabled');
+    } else if (action === 'zoom_disable') {
+      setZoomEnabled(false);
+      showToast('Gesture Zoom Disabled');
+    }
+
+    // 2. Transmit to backend
     try {
-      const res = await fetch(`${backendUrl}/api/control/${action}`, { method: 'POST' });
-      if (res.ok) {
-        if (action === 'start') setStatus('running');
-        if (action === 'pause') setStatus('paused');
-        if (action === 'resume') setStatus('running');
-        if (action === 'stop') setStatus('stopped');
-        if (action === 'zoom_enable') setZoomEnabled(true);
-        if (action === 'zoom_disable') setZoomEnabled(false);
-      }
+      await fetch(`${backendUrl}/api/control/${action}`, { method: 'POST' });
     } catch (err) {
-      console.error(`Failed to execute ${action}:`, err);
+      console.warn(`Backend call for ${action} deferred:`, err);
     }
   };
 
-  const updateTtsSettings = (settings: Record<string, unknown>) => {
+  const handleTestVoice = () => {
+    const text = 'Hello, this is a voice test from IntentOS.';
+    setTtsStatus('speaking');
+    setTtsLastText(text);
+    showToast('Testing Voice Speech...');
+
+    // Play immediately via browser audio
+    if ('speechSynthesis' in window && !ttsMuted) {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = Math.max(0.5, Math.min(2.0, ttsRate / 175));
+      utterance.volume = ttsVolume;
+      utterance.onend = () => setTtsStatus('Idle');
+      utterance.onerror = () => setTtsStatus('Idle');
+      window.speechSynthesis.speak(utterance);
+    }
+
+    // Forward to backend
+    fetch(`${backendUrl}/api/tts/speak`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text })
+    }).catch(() => {});
+  };
+
+  const handleStopSpeaking = () => {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    setTtsStatus('Idle');
+    showToast('Voice Output Stopped');
+    fetch(`${backendUrl}/api/tts/stop`, { method: 'POST' }).catch(() => {});
+  };
+
+  const handleToggleMute = () => {
+    const next = !ttsMuted;
+    setTtsMuted(next);
+    showToast(next ? 'Assistant Muted' : 'Assistant Unmuted');
     fetch(`${backendUrl}/api/tts/settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings)
-    }).catch(console.error);
+      body: JSON.stringify({ muted: next })
+    }).catch(() => {});
   };
 
   const handleSaveBackendUrl = (e: React.FormEvent) => {
@@ -195,13 +284,22 @@ export default function App() {
       setBackendUrl(clean);
       localStorage.setItem('intentos_backend_url', clean);
       setShowConfig(false);
+      showToast(`Backend set to: ${clean}`);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white p-8">
+    <div className="min-h-screen bg-gray-950 text-white p-4 md:p-8 relative">
+      {/* Toast Notification */}
+      {toast && (
+        <div className="fixed top-6 right-6 z-50 bg-blue-600 border border-blue-400 text-white px-5 py-3 rounded-xl shadow-2xl text-sm font-semibold flex items-center gap-2.5 animate-in fade-in slide-in-from-top-4 duration-200">
+          <CheckCircle2 size={18} className="text-blue-200" />
+          <span>{toast}</span>
+        </div>
+      )}
+
       {/* Header */}
-      <header className="sticky top-0 z-50 mb-8 flex flex-col md:flex-row justify-between items-center bg-gray-950/90 backdrop-blur p-4 border-b border-gray-800">
+      <header className="sticky top-0 z-40 mb-8 flex flex-col md:flex-row justify-between items-center bg-gray-950/90 backdrop-blur p-4 border-b border-gray-800 rounded-xl">
         <div className="mb-4 md:mb-0">
           <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">
             IntentOS
@@ -215,7 +313,7 @@ export default function App() {
           {/* Backend Connection Status */}
           <button
             onClick={() => setShowConfig(!showConfig)}
-            className="flex items-center gap-2 px-3 py-1.5 bg-gray-900 hover:bg-gray-800 border border-gray-700 rounded-lg text-sm transition-colors"
+            className="flex items-center gap-2 px-3 py-1.5 bg-gray-900 hover:bg-gray-800 border border-gray-700 rounded-lg text-sm transition-colors cursor-pointer"
             title="Click to configure backend URL"
           >
             <div className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
@@ -225,9 +323,10 @@ export default function App() {
             <Settings size={14} className="text-gray-400 ml-1" />
           </button>
 
+          {/* Emergency Stop Header Button */}
           <button
             onClick={() => handleAction('stop')}
-            className="flex items-center gap-2 px-5 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg uppercase tracking-wider transition-colors shadow-lg shadow-red-900/20 text-sm"
+            className="flex items-center gap-2 px-5 py-2 bg-red-600 hover:bg-red-700 active:scale-95 text-white font-bold rounded-lg uppercase tracking-wider transition-all shadow-lg shadow-red-900/30 text-sm cursor-pointer"
             title="Emergency Stop (Esc)"
           >
             <AlertTriangle size={18} />
@@ -256,7 +355,7 @@ export default function App() {
             <div className="flex gap-2 w-full md:w-auto">
               <button
                 type="submit"
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded text-sm transition-colors"
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded text-sm transition-colors cursor-pointer"
               >
                 Connect
               </button>
@@ -267,23 +366,24 @@ export default function App() {
                   setBackendUrl(DEFAULT_BACKEND_URL);
                   localStorage.removeItem('intentos_backend_url');
                   setShowConfig(false);
+                  showToast('Reset to default: http://localhost:8000');
                 }}
-                className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded transition-colors"
+                className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded transition-colors cursor-pointer"
               >
                 Reset Default
               </button>
               <button
                 type="button"
                 onClick={() => setShowConfig(false)}
-                className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded transition-colors"
+                className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded transition-colors cursor-pointer"
               >
                 Close
               </button>
             </div>
           </form>
           <div className="mt-3 p-3 bg-gray-950/60 rounded-lg text-xs text-gray-400 space-y-1">
-            <p>• <strong>Default local:</strong> <code className="text-blue-400">http://localhost:8000</code></p>
-            <p>• <strong>If controlling across computers or over internet:</strong> run <code className="text-blue-400">npx localtunnel --port 8000</code> on your host and paste the https URL here.</p>
+            <p>• <strong>Local machine:</strong> <code className="text-blue-400">http://localhost:8000</code></p>
+            <p>• <strong>To connect across computers:</strong> run <code className="text-blue-400">npx localtunnel --port 8000</code> in terminal and paste the https URL here.</p>
           </div>
         </div>
       )}
@@ -313,7 +413,7 @@ export default function App() {
             <h2 className="text-lg font-semibold flex items-center gap-2">
               <Hand size={20} /> Gestures
             </h2>
-            <span className={`text-sm ${status === 'running' ? 'text-green-400' : 'text-gray-400'}`}>
+            <span className={`text-sm ${status === 'running' ? 'text-green-400 font-bold' : 'text-gray-400'}`}>
               {status === 'running' ? 'Active' : 'Standby'}
             </span>
           </div>
@@ -327,18 +427,18 @@ export default function App() {
         <div className="bg-gray-900 p-6 rounded-xl border border-gray-800">
           <div className="flex justify-between mb-4">
             <h2 className="text-lg font-semibold flex items-center gap-2">
-              <Search size={20} /> Zoom
+              <Search size={20} /> Zoom Control
             </h2>
-            <span className={`text-sm ${zoomEnabled ? 'text-green-400' : 'text-gray-500'}`}>
+            <span className={`text-sm font-semibold ${zoomEnabled ? 'text-green-400' : 'text-gray-500'}`}>
               {zoomEnabled ? 'Enabled' : 'Disabled'}
             </span>
           </div>
           <div className="flex flex-col gap-2">
-            <p className="text-xl font-mono truncate">{lastZoomAction}</p>
+            <p className="text-xl font-mono truncate text-gray-300">{lastZoomAction}</p>
             <button
               onClick={() => handleAction(zoomEnabled ? 'zoom_disable' : 'zoom_enable')}
-              className={`py-1.5 px-3 mt-2 rounded text-sm font-semibold transition-colors ${
-                zoomEnabled ? 'bg-gray-700 hover:bg-gray-600' : 'bg-blue-600 hover:bg-blue-700'
+              className={`py-2 px-3 mt-2 rounded-lg text-sm font-semibold transition-all cursor-pointer active:scale-95 ${
+                zoomEnabled ? 'bg-gray-700 hover:bg-gray-600 text-white' : 'bg-blue-600 hover:bg-blue-700 text-white'
               }`}
             >
               {zoomEnabled ? 'Disable Zoom' : 'Enable Zoom'}
@@ -350,33 +450,39 @@ export default function App() {
         <div className="bg-gray-900 p-6 rounded-xl border border-gray-800">
           <div className="flex justify-between mb-4">
             <h2 className="text-lg font-semibold flex items-center gap-2">
-              <Monitor size={20} /> System Control
+              <Monitor size={20} /> System State
             </h2>
             <span className={`text-sm font-bold ${status === 'running' ? 'text-green-400' : 'text-yellow-400'}`}>
               {status.toUpperCase()}
             </span>
           </div>
           <div className="flex gap-2">
+            {/* Start / Resume */}
             <button
               onClick={() => handleAction(status === 'paused' ? 'resume' : 'start')}
-              className="p-2.5 bg-green-600 hover:bg-green-700 rounded transition-colors text-white font-bold"
+              className="flex-1 py-2.5 px-3 bg-green-600 hover:bg-green-700 active:scale-95 rounded-lg transition-all text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-green-900/20"
               title={status === 'paused' ? 'Resume' : 'Start'}
             >
-              <Play size={20} />
+              <Play size={18} />
+              <span>{status === 'paused' ? 'Resume' : 'Start'}</span>
             </button>
+            {/* Pause */}
             <button
               onClick={() => handleAction('pause')}
-              className="p-2.5 bg-yellow-600 hover:bg-yellow-700 rounded transition-colors text-white font-bold"
+              className="flex-1 py-2.5 px-3 bg-yellow-600 hover:bg-yellow-700 active:scale-95 rounded-lg transition-all text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-yellow-900/20"
               title="Pause"
             >
-              <Pause size={20} />
+              <Pause size={18} />
+              <span>Pause</span>
             </button>
+            {/* Stop */}
             <button
               onClick={() => handleAction('stop')}
-              className="p-2.5 bg-red-600 hover:bg-red-700 rounded transition-colors text-white font-bold"
+              className="flex-1 py-2.5 px-3 bg-red-600 hover:bg-red-700 active:scale-95 rounded-lg transition-all text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-red-900/20"
               title="Stop"
             >
-              <Square size={20} />
+              <Square size={18} />
+              <span>Stop</span>
             </button>
           </div>
         </div>
@@ -466,7 +572,7 @@ export default function App() {
               </span>
               <button
                 onClick={() => handleAction('stop')}
-                className="px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 font-semibold rounded transition-colors text-sm"
+                className="px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 font-semibold rounded transition-colors text-sm cursor-pointer"
               >
                 Force Stop
               </button>
@@ -492,16 +598,13 @@ export default function App() {
               {ttsStatus}
             </span>
             <button
-              onClick={() => {
-                const newMuted = !ttsMuted;
-                setTtsMuted(newMuted);
-                updateTtsSettings({ muted: newMuted });
-              }}
-              className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
-                ttsMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-700 hover:bg-gray-600'
+              onClick={handleToggleMute}
+              className={`px-3 py-1.5 rounded-lg text-sm font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                ttsMuted ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-gray-700 hover:bg-gray-600 text-gray-200'
               }`}
             >
-              {ttsMuted ? 'Unmute' : 'Mute'}
+              {ttsMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+              <span>{ttsMuted ? 'Unmute' : 'Mute'}</span>
             </button>
           </div>
         </div>
@@ -517,7 +620,12 @@ export default function App() {
                 value={ttsSelectedVoice}
                 onChange={e => {
                   setTtsSelectedVoice(e.target.value);
-                  updateTtsSettings({ voice_id: e.target.value });
+                  showToast(`Selected voice: ${e.target.value}`);
+                  fetch(`${backendUrl}/api/tts/settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ voice_id: e.target.value })
+                  }).catch(() => {});
                 }}
               >
                 {ttsVoices.map(v => (
@@ -539,9 +647,13 @@ export default function App() {
                 onChange={e => {
                   const val = parseInt(e.target.value);
                   setTtsRate(val);
-                  updateTtsSettings({ rate: val });
+                  fetch(`${backendUrl}/api/tts/settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ rate: val })
+                  }).catch(() => {});
                 }}
-                className="w-full"
+                className="w-full cursor-pointer"
               />
             </div>
 
@@ -558,30 +670,26 @@ export default function App() {
                 onChange={e => {
                   const val = parseFloat(e.target.value);
                   setTtsVolume(val);
-                  updateTtsSettings({ volume: val });
+                  fetch(`${backendUrl}/api/tts/settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ volume: val })
+                  }).catch(() => {});
                 }}
-                className="w-full"
+                className="w-full cursor-pointer"
               />
             </div>
 
             <div className="flex gap-2 mt-2">
               <button
-                onClick={() => {
-                  fetch(`${backendUrl}/api/tts/speak`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: 'Hello, this is a voice test from IntentOS.' })
-                  }).catch(console.error);
-                }}
-                className="flex-1 px-4 py-2 bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 font-semibold rounded transition-colors text-sm"
+                onClick={handleTestVoice}
+                className="flex-1 py-2 px-4 bg-blue-600 hover:bg-blue-700 active:scale-95 text-white font-semibold rounded-lg transition-all text-sm cursor-pointer shadow-md shadow-blue-900/20"
               >
                 Test Voice
               </button>
               <button
-                onClick={() => {
-                  fetch(`${backendUrl}/api/tts/stop`, { method: 'POST' }).catch(console.error);
-                }}
-                className="flex-1 px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 font-semibold rounded transition-colors text-sm"
+                onClick={handleStopSpeaking}
+                className="flex-1 py-2 px-4 bg-red-600/20 hover:bg-red-600/40 active:scale-95 text-red-400 font-semibold rounded-lg transition-all text-sm cursor-pointer border border-red-500/20"
               >
                 Stop Speaking
               </button>
@@ -606,7 +714,7 @@ export default function App() {
         </h2>
         <button
           onClick={() => handleAction('stop')}
-          className="w-full py-4 bg-red-600 hover:bg-red-700 rounded-lg text-xl font-bold uppercase tracking-wider transition-colors"
+          className="w-full py-4 bg-red-600 hover:bg-red-700 active:scale-[0.99] rounded-lg text-xl font-bold uppercase tracking-wider transition-all cursor-pointer shadow-xl shadow-red-900/40"
         >
           STOP ALL CONTROLS
         </button>
