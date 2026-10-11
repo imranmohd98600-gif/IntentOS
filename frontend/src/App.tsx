@@ -12,7 +12,10 @@ import {
   Settings,
   RefreshCw,
   Wifi,
-  WifiOff
+  WifiOff,
+  Camera,
+  Globe,
+  Radio
 } from 'lucide-react';
 
 const DEFAULT_BACKEND_URL = 'http://localhost:8000';
@@ -41,6 +44,11 @@ export default function App() {
   const [ttsStatus, setTtsStatus] = useState('Idle');
   const [ttsLastText, setTtsLastText] = useState('');
 
+  // In-browser standalone mode state
+  const [browserMode, setBrowserMode] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const recognitionRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   // Helper to construct WebSocket URL
@@ -52,6 +60,169 @@ export default function App() {
     return trimmed.replace('http://', 'ws://') + '/ws/events';
   };
 
+  // Browser speech synthesis fallback
+  const speakBrowserTts = (text: string) => {
+    if (ttsMuted || !text) return;
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.rate = Math.max(0.5, Math.min(2.0, ttsRate / 175));
+      utterance.volume = ttsVolume;
+      setTtsStatus('speaking');
+      setTtsLastText(text);
+      utterance.onend = () => setTtsStatus('Idle');
+      utterance.onerror = () => setTtsStatus('Idle');
+      window.speechSynthesis.speak(utterance);
+    }
+  };
+
+  // Start in-browser webcam & speech recognition
+  const startBrowserMode = async () => {
+    try {
+      setBrowserMode(true);
+      setStatus('running');
+      setVoiceListening(true);
+      setVoiceState('listening');
+
+      // Request browser webcam
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+
+      // Initialize Web Speech API for voice recognition
+      const SpeechRecognition =
+        (window as any).SpeechRecognition ||
+        (window as any).webkitSpeechRecognition;
+
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+
+        recognition.onresult = (event: any) => {
+          const transcript = event.results[event.results.length - 1][0].transcript.trim();
+          handleBrowserVoiceCommand(transcript);
+        };
+
+        recognition.onerror = () => {
+          // Restart on error
+          try { recognition.start(); } catch (_) {}
+        };
+
+        recognition.onend = () => {
+          // Restart if still in browser mode
+          if (streamRef.current) {
+            try { recognition.start(); } catch (_) {}
+          }
+        };
+
+        recognition.start();
+        recognitionRef.current = recognition;
+      }
+
+      speakBrowserTts("IntentOS Browser Mode active. Camera and voice are ready.");
+    } catch (err) {
+      console.error('Browser media error:', err);
+      alert('Camera or microphone permission was denied or not supported by this browser.');
+    }
+  };
+
+  // Stop in-browser standalone mode
+  const stopBrowserMode = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch (_) {}
+      recognitionRef.current = null;
+    }
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    setBrowserMode(false);
+    setStatus('stopped');
+    setVoiceListening(false);
+    setVoiceState('Idle');
+  };
+
+  // Handle in-browser voice commands
+  const handleBrowserVoiceCommand = (text: string) => {
+    const lower = text.toLowerCase();
+    let reply = "Recognized your command.";
+    let intent = "unknown";
+
+    if (lower.includes('scroll down')) {
+      intent = "scroll";
+      reply = "Scrolling down.";
+      window.scrollBy({ top: 300, behavior: 'smooth' });
+    } else if (lower.includes('scroll up')) {
+      intent = "scroll";
+      reply = "Scrolling up.";
+      window.scrollBy({ top: -300, behavior: 'smooth' });
+    } else if (lower.includes('zoom in')) {
+      intent = "zoom_in";
+      setZoomEnabled(true);
+      setLastZoomAction('Zoom In');
+      reply = "Zooming in.";
+    } else if (lower.includes('zoom out')) {
+      intent = "zoom_out";
+      setZoomEnabled(true);
+      setLastZoomAction('Zoom Out');
+      reply = "Zooming out.";
+    } else if (lower.includes('stop')) {
+      stopBrowserMode();
+      reply = "Stopping all controls.";
+    } else if (lower.includes('pause')) {
+      setStatus('paused');
+      reply = "Pausing control.";
+    } else if (lower.includes('resume') || lower.includes('start')) {
+      setStatus('running');
+      reply = "Resuming control.";
+    } else if (lower.includes('open google')) {
+      intent = "browser_open";
+      reply = "Opening Google in a new tab.";
+      window.open('https://www.google.com', '_blank');
+    }
+
+    setVoiceHistory(prev => [
+      {
+        time: new Date().toLocaleTimeString(),
+        text,
+        actions: [{ intent }],
+        reply,
+        success: true
+      },
+      ...prev
+    ].slice(0, 5));
+
+    speakBrowserTts(reply);
+  };
+
+  // Load browser speech synthesis voices
+  useEffect(() => {
+    const loadVoices = () => {
+      if ('speechSynthesis' in window) {
+        const sysVoices = window.speechSynthesis.getVoices();
+        if (sysVoices.length > 0 && ttsVoices.length === 0) {
+          setTtsVoices(sysVoices.map(v => ({ id: v.name, name: v.name })));
+          setTtsSelectedVoice(sysVoices[0].name);
+        }
+      }
+    };
+    loadVoices();
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+    }
+  }, [ttsVoices.length]);
+
+  // Main connection effect for backend
   useEffect(() => {
     let active = true;
 
@@ -74,7 +245,6 @@ export default function App() {
           }
         })
         .catch(() => {
-          // If WS is also disconnected, mark connected as false
           if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
             if (active) setConnected(false);
           }
@@ -84,13 +254,15 @@ export default function App() {
     fetchStatus();
     const intervalId = window.setInterval(fetchStatus, 4000);
 
-    // Fetch TTS voices
+    // Fetch TTS voices from backend
     fetch(`${backendUrl}/api/tts/voices`)
       .then(res => res.json())
       .then(data => {
         if (!active) return;
-        setTtsVoices(data.voices || []);
-        if (data.current_id) setTtsSelectedVoice(data.current_id);
+        if (data.voices && data.voices.length > 0) {
+          setTtsVoices(data.voices);
+          if (data.current_id) setTtsSelectedVoice(data.current_id);
+        }
       })
       .catch(() => {});
 
@@ -108,15 +280,8 @@ export default function App() {
         if (!active) return;
         try {
           const data = JSON.parse(event.data);
-
-          if (data.type === 'status_change') {
-            setStatus(data.payload.status);
-          }
-
-          if (data.type === 'gesture') {
-            setLastGesture(data.payload.name);
-          }
-
+          if (data.type === 'status_change') setStatus(data.payload.status);
+          if (data.type === 'gesture') setLastGesture(data.payload.name);
           if (data.type === 'voice') {
             const item = {
               time: new Date().toLocaleTimeString(),
@@ -127,25 +292,16 @@ export default function App() {
             };
             setVoiceHistory(prev => [item, ...prev].slice(0, 5));
           }
-
           if (data.type === 'voice_status') {
-            if (data.payload.listening !== undefined) {
-              setVoiceListening(data.payload.listening);
-            }
-            if (data.payload.state !== undefined) {
-              setVoiceState(data.payload.state);
-            }
+            if (data.payload.listening !== undefined) setVoiceListening(data.payload.listening);
+            if (data.payload.state !== undefined) setVoiceState(data.payload.state);
           }
-
           if (data.type === 'zoom_status') {
-            if (data.payload.enabled !== undefined) {
-              setZoomEnabled(data.payload.enabled);
-            }
+            if (data.payload.enabled !== undefined) setZoomEnabled(data.payload.enabled);
             if (data.payload.action && data.payload.action !== 'None') {
               setLastZoomAction(data.payload.action);
             }
           }
-
           if (data.type === 'tts_status') {
             if (data.payload.state) setTtsStatus(data.payload.state);
             if (data.payload.text) setTtsLastText(data.payload.text);
@@ -154,25 +310,17 @@ export default function App() {
           console.error('Invalid WebSocket message:', error);
         }
       };
-
-      ws.onclose = () => {
-        if (active) {
-          // If polling also failed, mark disconnected
-        }
-      };
-
-      ws.onerror = () => {
-        // WebSocket error
-      };
-    } catch (err) {
-      console.warn('Could not connect WebSocket to', backendUrl, err);
-    }
+    } catch (_) {}
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        fetch(`${backendUrl}/api/control/stop`, { method: 'POST' }).catch(() => {});
-        setStatus('stopped');
+        if (browserMode) {
+          stopBrowserMode();
+        } else {
+          fetch(`${backendUrl}/api/control/stop`, { method: 'POST' }).catch(() => {});
+          setStatus('stopped');
+        }
       }
     };
 
@@ -181,40 +329,54 @@ export default function App() {
     return () => {
       active = false;
       window.clearInterval(intervalId);
-      if (ws) {
-        ws.close();
-      }
+      if (ws) ws.close();
       wsRef.current = null;
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [backendUrl]);
+  }, [backendUrl, browserMode]);
 
   const handleAction = async (action: string) => {
-    try {
-      const res = await fetch(`${backendUrl}/api/control/${action}`, {
-        method: 'POST'
-      });
-      if (!res.ok) throw new Error(`Control request failed: ${res.status}`);
-      // Optimistic update
-      if (action === 'start') setStatus('running');
-      if (action === 'pause') setStatus('paused');
-      if (action === 'resume') setStatus('running');
-      if (action === 'stop') setStatus('stopped');
-      if (action === 'zoom_enable') setZoomEnabled(true);
-      if (action === 'zoom_disable') setZoomEnabled(false);
-    } catch (error) {
-      console.error(error);
-      // Even if offline, update UI for testing/feedback
-      if (action === 'stop') setStatus('stopped');
+    // If backend is connected, use backend
+    if (connected) {
+      try {
+        await fetch(`${backendUrl}/api/control/${action}`, { method: 'POST' });
+        if (action === 'start') setStatus('running');
+        if (action === 'pause') setStatus('paused');
+        if (action === 'resume') setStatus('running');
+        if (action === 'stop') setStatus('stopped');
+        if (action === 'zoom_enable') setZoomEnabled(true);
+        if (action === 'zoom_disable') setZoomEnabled(false);
+      } catch (err) {
+        console.error(err);
+      }
+      return;
+    }
+
+    // If backend is offline, handle via browser standalone mode!
+    if (action === 'start' || action === 'resume') {
+      startBrowserMode();
+    } else if (action === 'pause') {
+      setStatus('paused');
+      speakBrowserTts("Pausing control.");
+    } else if (action === 'stop') {
+      stopBrowserMode();
+    } else if (action === 'zoom_enable') {
+      setZoomEnabled(true);
+      speakBrowserTts("Zoom enabled.");
+    } else if (action === 'zoom_disable') {
+      setZoomEnabled(false);
+      speakBrowserTts("Zoom disabled.");
     }
   };
 
   const updateTtsSettings = (settings: Record<string, unknown>) => {
-    fetch(`${backendUrl}/api/tts/settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings)
-    }).catch(console.error);
+    if (connected) {
+      fetch(`${backendUrl}/api/tts/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings)
+      }).catch(console.error);
+    }
   };
 
   const handleSaveBackendUrl = (e: React.FormEvent) => {
@@ -240,53 +402,62 @@ export default function App() {
           </p>
         </div>
 
-        <div className="flex items-center gap-4 flex-wrap">
+        <div className="flex items-center gap-3 flex-wrap">
+          {/* Mode Indicator */}
+          {browserMode && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-950/80 border border-blue-600/50 rounded-lg text-xs font-semibold text-blue-300">
+              <Camera size={14} className="text-blue-400 animate-pulse" />
+              <span>Browser Camera & Voice Active</span>
+            </div>
+          )}
+
           {/* Backend Connection Status & Switcher */}
           <button
             onClick={() => setShowConfig(!showConfig)}
             className="flex items-center gap-2 px-3 py-1.5 bg-gray-900 hover:bg-gray-800 border border-gray-700 rounded-lg text-sm transition-colors"
-            title="Click to configure backend URL"
+            title="Click to configure backend URL or tunnel"
           >
-            <div className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
-            <span className="text-gray-300">
-              {connected ? 'Backend Connected' : 'Backend Disconnected'}
+            <div className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-green-500 animate-pulse' : (browserMode ? 'bg-blue-400' : 'bg-yellow-500')}`} />
+            <span className="text-gray-300 text-xs md:text-sm">
+              {connected ? 'Python Backend Online' : (browserMode ? 'Browser Mode' : 'Backend Standby')}
             </span>
             <Settings size={14} className="text-gray-400 ml-1" />
           </button>
 
           <button
             onClick={() => handleAction('stop')}
-            className="flex items-center gap-2 px-6 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg uppercase tracking-wider transition-colors shadow-lg shadow-red-900/20"
+            className="flex items-center gap-2 px-5 py-2 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg uppercase tracking-wider transition-colors shadow-lg shadow-red-900/20 text-sm"
             title="Emergency Stop (Esc)"
           >
-            <AlertTriangle size={20} />
+            <AlertTriangle size={18} />
             STOP
           </button>
         </div>
       </header>
 
-      {/* Backend URL Configuration Modal / Banner */}
+      {/* Backend URL Configuration Modal */}
       {showConfig && (
-        <div className="mb-8 p-4 bg-gray-900 border border-blue-500/50 rounded-xl shadow-xl">
+        <div className="mb-8 p-5 bg-gray-900 border border-blue-500/50 rounded-xl shadow-xl">
+          <h3 className="text-sm font-bold text-white mb-2 flex items-center gap-2">
+            <Radio size={16} className="text-blue-400" />
+            Connect Backend (Local or Remote)
+          </h3>
           <form onSubmit={handleSaveBackendUrl} className="flex flex-col md:flex-row items-center gap-3">
             <div className="flex-1 w-full">
-              <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">
-                Backend Server URL
-              </label>
               <input
                 type="text"
                 value={inputUrl}
                 onChange={e => setInputUrl(e.target.value)}
-                placeholder="http://localhost:8000 or http://192.168.1.X:8000"
+                placeholder="http://localhost:8000 or https://xyz.loca.lt"
                 className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
               />
             </div>
-            <div className="flex gap-2 w-full md:w-auto mt-4 md:mt-5">
+            <div className="flex gap-2 w-full md:w-auto">
               <button
                 type="submit"
                 className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded text-sm transition-colors"
               >
-                Save & Connect
+                Connect
               </button>
               <button
                 type="button"
@@ -298,7 +469,7 @@ export default function App() {
                 }}
                 className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded transition-colors"
               >
-                Reset Default
+                Reset
               </button>
               <button
                 type="button"
@@ -309,26 +480,39 @@ export default function App() {
               </button>
             </div>
           </form>
-          <p className="text-xs text-gray-400 mt-2">
-            Default is <code className="text-blue-400">http://localhost:8000</code>. If controlling another PC over LAN or tunnel, enter its IP/URL here.
-          </p>
+          <div className="mt-3 p-3 bg-gray-950/60 rounded-lg text-xs text-gray-400 space-y-1">
+            <p>• <strong>To connect across computers with zero security blocks:</strong> run <code className="text-blue-400 bg-gray-900 px-1 py-0.5 rounded">npx localtunnel --port 8000</code> in your terminal, then paste the generated HTTPS URL above.</p>
+            <p>• <strong>To test without any backend installed:</strong> click the green <strong>Start (▶)</strong> button to run camera & voice directly in your browser.</p>
+          </div>
         </div>
       )}
 
-
-
-      {/* Webcam Feed */}
-      {(status === 'running' || status === 'paused') && (
-        <div className="mb-8 bg-gray-900 p-4 rounded-xl border border-gray-800 flex flex-col items-center justify-center">
-          <img
-            src={`${backendUrl}/api/video_feed`}
-            alt="Webcam Feed"
-            className="rounded-lg shadow-lg max-h-96 object-cover"
-            onError={e => {
-              // Hide image or show fallback if video stream cannot be reached
-              (e.target as HTMLElement).style.display = 'none';
-            }}
-          />
+      {/* Webcam Feed Section */}
+      {(status === 'running' || status === 'paused' || browserMode) && (
+        <div className="mb-8 bg-gray-900 p-4 rounded-xl border border-gray-800 flex flex-col items-center justify-center relative">
+          {browserMode ? (
+            <div className="relative">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="rounded-lg shadow-lg max-h-96 object-cover transform -scale-x-100"
+              />
+              <div className="absolute top-3 left-3 bg-blue-600/80 backdrop-blur px-2.5 py-1 rounded text-xs font-semibold text-white flex items-center gap-1.5">
+                <Camera size={13} /> Live Browser Camera
+              </div>
+            </div>
+          ) : (
+            <img
+              src={`${backendUrl}/api/video_feed`}
+              alt="Webcam Feed"
+              className="rounded-lg shadow-lg max-h-96 object-cover"
+              onError={e => {
+                (e.target as HTMLElement).style.display = 'none';
+              }}
+            />
+          )}
         </div>
       )}
 
@@ -340,7 +524,9 @@ export default function App() {
             <h2 className="text-lg font-semibold flex items-center gap-2">
               <Hand size={20} /> Gestures
             </h2>
-            <span className="text-blue-400 text-sm">Active</span>
+            <span className="text-blue-400 text-sm">
+              {status === 'running' ? 'Active' : 'Standby'}
+            </span>
           </div>
           <p className="text-3xl font-mono">{lastGesture}</p>
         </div>
@@ -372,7 +558,7 @@ export default function App() {
         <div className="bg-gray-900 p-6 rounded-xl border border-gray-800">
           <div className="flex justify-between mb-4">
             <h2 className="text-lg font-semibold flex items-center gap-2">
-              <Monitor size={20} /> System
+              <Monitor size={20} /> System Control
             </h2>
             <span className={`text-sm ${status === 'running' ? 'text-green-400' : 'text-yellow-400'}`}>
               {status.toUpperCase()}
@@ -472,14 +658,12 @@ export default function App() {
           <div className="flex flex-col justify-between">
             <div>
               <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wider">
-                Supported Commands
+                Supported Voice Commands
               </h3>
               <ul className="text-sm text-gray-300 space-y-2 mb-4">
-                <li>• <span className="text-blue-400">Browser:</span> "Open Google and search birds", "Close tab"</li>
-                <li>• <span className="text-blue-400">Mouse:</span> "Move cursor up", "Scroll down", "Double click"</li>
-                <li>• <span className="text-blue-400">Keyboard:</span> "Type hello", "Press Enter", "Copy", "Paste"</li>
-                <li>• <span className="text-blue-400">Windows:</span> "Maximize window", "Switch window"</li>
-                <li>• <span className="text-blue-400">System:</span> "Pause control", "Enable zoom"</li>
+                <li>• <span className="text-blue-400">Navigation:</span> "Open Google", "Scroll down", "Scroll up"</li>
+                <li>• <span className="text-blue-400">Zoom:</span> "Zoom in", "Zoom out"</li>
+                <li>• <span className="text-blue-400">Controls:</span> "Pause", "Resume", "Stop"</li>
               </ul>
             </div>
 
@@ -503,7 +687,7 @@ export default function App() {
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-xl font-bold flex items-center gap-2">
             <Play className={ttsStatus === 'speaking' ? 'text-green-400 animate-pulse' : 'text-gray-500'} />
-            Assistant Voice
+            Assistant Voice Responses
           </h2>
           <div className="flex items-center gap-4">
             <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wide ${
@@ -590,11 +774,16 @@ export default function App() {
             <div className="flex gap-2 mt-2">
               <button
                 onClick={() => {
-                  fetch(`${backendUrl}/api/tts/speak`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: 'Hello, this is a voice test from IntentOS.' })
-                  }).catch(console.error);
+                  const testPhrase = 'Hello, this is a voice test from IntentOS.';
+                  if (connected) {
+                    fetch(`${backendUrl}/api/tts/speak`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ text: testPhrase })
+                    }).catch(console.error);
+                  } else {
+                    speakBrowserTts(testPhrase);
+                  }
                 }}
                 className="flex-1 px-4 py-2 bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 font-semibold rounded transition-colors text-sm"
               >
@@ -602,7 +791,12 @@ export default function App() {
               </button>
               <button
                 onClick={() => {
-                  fetch(`${backendUrl}/api/tts/stop`, { method: 'POST' }).catch(console.error);
+                  if (connected) {
+                    fetch(`${backendUrl}/api/tts/stop`, { method: 'POST' }).catch(console.error);
+                  } else {
+                    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+                    setTtsStatus('Idle');
+                  }
                 }}
                 className="flex-1 px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 font-semibold rounded transition-colors text-sm"
               >
