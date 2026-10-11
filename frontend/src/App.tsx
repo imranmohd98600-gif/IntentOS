@@ -23,6 +23,7 @@ export default function App() {
   });
   const [showConfig, setShowConfig] = useState(false);
   const [inputUrl, setInputUrl] = useState(backendUrl);
+  const [dismissNotice, setDismissNotice] = useState(false);
 
   const [status, setStatus] = useState('stopped');
   const [connected, setConnected] = useState(false);
@@ -316,20 +317,29 @@ export default function App() {
       )}
 
       {/* Disconnected Assistant Helper Notice */}
-      {!connected && !showConfig && (
+      {!connected && !showConfig && !dismissNotice && (
         <div className="mb-6 p-4 rounded-xl border border-blue-900/40 bg-blue-950/20 flex flex-col md:flex-row justify-between items-center gap-3 text-sm">
           <div className="flex items-center gap-3 text-blue-300">
             <WifiOff size={20} className="text-blue-400 shrink-0" />
             <span>
-              Targeting <strong className="text-white">{backendUrl}</strong>. If backend is not started, launch it locally with <code className="bg-gray-900 px-1.5 py-0.5 rounded text-blue-200">uvicorn main:app --reload</code>.
+              Targeting <strong className="text-white">{backendUrl}</strong>. If backend is not started on this machine, launch it locally with <code className="bg-gray-900 px-1.5 py-0.5 rounded text-blue-200">uvicorn main:app --reload</code>.
             </span>
           </div>
-          <button
-            onClick={() => setShowConfig(true)}
-            className="text-xs bg-blue-600/30 hover:bg-blue-600/50 text-blue-200 px-3 py-1.5 rounded-lg border border-blue-500/30 font-medium transition-colors shrink-0"
-          >
-            Change Backend URL
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setShowConfig(true)}
+              className="text-xs bg-blue-600/30 hover:bg-blue-600/50 text-blue-200 px-3 py-1.5 rounded-lg border border-blue-500/30 font-medium transition-colors"
+            >
+              Configure URL
+            </button>
+            <button
+              onClick={() => setDismissNotice(true)}
+              className="text-xs text-gray-400 hover:text-gray-200 px-2 py-1.5 rounded transition-colors"
+              title="Dismiss notice"
+            >
+              ✕ Dismiss
+            </button>
+          </div>
         </div>
       )}
 
