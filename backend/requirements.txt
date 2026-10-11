@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+websockets
+opencv-python
+mediapipe
+pyautogui
+SpeechRecognition
+pydantic
+pytest
+comtypes
+pycaw
+pyttsx3

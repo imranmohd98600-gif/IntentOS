@@ -1,0 +1,14 @@
+backend/venv/
+**/venv/
+**/.venv/
+**/node_modules/
+**/dist/
+**/__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.vscode/
+.idea/
+*.log
