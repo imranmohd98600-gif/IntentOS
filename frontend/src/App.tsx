@@ -1,5 +1,4 @@
-
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Activity,
   Play,
@@ -9,13 +8,22 @@ import {
   Monitor,
   Mic,
   Hand,
-  Search
+  Search,
+  Settings,
+  RefreshCw,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 
-const HEALTH_URL = 'https://intentos-1-whlm.onrender.com/api/status';
-const LOCAL_API = 'http://localhost:8000';
+const DEFAULT_BACKEND_URL = 'http://localhost:8000';
 
 export default function App() {
+  const [backendUrl, setBackendUrl] = useState(() => {
+    return localStorage.getItem('intentos_backend_url') || DEFAULT_BACKEND_URL;
+  });
+  const [showConfig, setShowConfig] = useState(false);
+  const [inputUrl, setInputUrl] = useState(backendUrl);
+
   const [status, setStatus] = useState('stopped');
   const [connected, setConnected] = useState(false);
   const [lastGesture, setLastGesture] = useState('None');
@@ -33,132 +41,137 @@ export default function App() {
   const [ttsStatus, setTtsStatus] = useState('Idle');
   const [ttsLastText, setTtsLastText] = useState('');
 
-  const isLocal =
-    window.location.hostname === 'localhost' ||
-    window.location.hostname === '127.0.0.1';
+  const wsRef = useRef<WebSocket | null>(null);
+
+  // Helper to construct WebSocket URL
+  const getWsUrl = (httpUrl: string) => {
+    const trimmed = httpUrl.replace(/\/+$/, '');
+    if (trimmed.startsWith('https://')) {
+      return trimmed.replace('https://', 'wss://') + '/ws/events';
+    }
+    return trimmed.replace('http://', 'ws://') + '/ws/events';
+  };
 
   useEffect(() => {
     let active = true;
 
-    // Hosted health check: used for the dashboard indicator.
-    const checkHealth = () => {
-      fetch(HEALTH_URL)
+    const fetchStatus = () => {
+      fetch(`${backendUrl}/api/status`)
         .then(res => {
-          if (!res.ok) throw new Error('Health check failed');
+          if (!res.ok) throw new Error(`HTTP error ${res.status}`);
           return res.json();
         })
         .then(data => {
-          if (active) setConnected(data.status === 'connected');
+          if (!active) return;
+          setConnected(true);
+          setStatus(
+            data.paused ? 'paused' :
+            data.running ? 'running' : 'stopped'
+          );
+          if (data.voice_engine === 'ready') setVoiceListening(true);
+          if (data.zoom_enabled !== undefined) {
+            setZoomEnabled(data.zoom_enabled);
+          }
         })
         .catch(() => {
-          if (active) setConnected(false);
+          // If WS is also disconnected, mark connected as false
+          if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+            if (active) setConnected(false);
+          }
         });
     };
 
-    checkHealth();
-    const healthInterval = window.setInterval(checkHealth, 30000);
+    fetchStatus();
+    const intervalId = window.setInterval(fetchStatus, 4000);
 
-    // Full PC-control features run only with the local backend.
-    if (!isLocal) {
-      return () => {
-        active = false;
-        window.clearInterval(healthInterval);
-      };
-    }
-
-    fetch(`${LOCAL_API}/api/status`)
-      .then(res => res.json())
-      .then(data => {
-        if (!active) return;
-        setStatus(
-          data.paused ? 'paused' :
-          data.running ? 'running' : 'stopped'
-        );
-        if (data.voice_engine === 'ready') setVoiceListening(true);
-        if (data.zoom_enabled !== undefined) {
-          setZoomEnabled(data.zoom_enabled);
-        }
-      })
-      .catch(console.error);
-
-    fetch(`${LOCAL_API}/api/tts/voices`)
+    // Fetch TTS voices
+    fetch(`${backendUrl}/api/tts/voices`)
       .then(res => res.json())
       .then(data => {
         if (!active) return;
         setTtsVoices(data.voices || []);
         if (data.current_id) setTtsSelectedVoice(data.current_id);
       })
-      .catch(console.error);
+      .catch(() => {});
 
-    const ws = new WebSocket('ws://localhost:8000/ws/events');
+    // WebSocket connection
+    let ws: WebSocket | null = null;
+    try {
+      ws = new WebSocket(getWsUrl(backendUrl));
+      wsRef.current = ws;
 
-    ws.onopen = () => {
-      if (active) setConnected(true);
-    };
+      ws.onopen = () => {
+        if (active) setConnected(true);
+      };
 
-    ws.onmessage = event => {
-      if (!active) return;
+      ws.onmessage = event => {
+        if (!active) return;
+        try {
+          const data = JSON.parse(event.data);
 
-      try {
-        const data = JSON.parse(event.data);
-
-        if (data.type === 'status_change') {
-          setStatus(data.payload.status);
-        }
-
-        if (data.type === 'gesture') {
-          setLastGesture(data.payload.name);
-        }
-
-        if (data.type === 'voice') {
-          const item = {
-            time: new Date().toLocaleTimeString(),
-            text: data.payload.text,
-            actions: data.payload.actions || [],
-            success: data.payload.success
-          };
-          setVoiceHistory(prev => [item, ...prev].slice(0, 5));
-        }
-
-        if (data.type === 'voice_status') {
-          if (data.payload.listening !== undefined) {
-            setVoiceListening(data.payload.listening);
+          if (data.type === 'status_change') {
+            setStatus(data.payload.status);
           }
-          if (data.payload.state !== undefined) {
-            setVoiceState(data.payload.state);
+
+          if (data.type === 'gesture') {
+            setLastGesture(data.payload.name);
           }
-        }
 
-        if (data.type === 'zoom_status') {
-          if (data.payload.enabled !== undefined) {
-            setZoomEnabled(data.payload.enabled);
+          if (data.type === 'voice') {
+            const item = {
+              time: new Date().toLocaleTimeString(),
+              text: data.payload.text,
+              actions: data.payload.actions || [],
+              reply: data.payload.reply,
+              success: data.payload.success
+            };
+            setVoiceHistory(prev => [item, ...prev].slice(0, 5));
           }
-          if (data.payload.action && data.payload.action !== 'None') {
-            setLastZoomAction(data.payload.action);
+
+          if (data.type === 'voice_status') {
+            if (data.payload.listening !== undefined) {
+              setVoiceListening(data.payload.listening);
+            }
+            if (data.payload.state !== undefined) {
+              setVoiceState(data.payload.state);
+            }
           }
+
+          if (data.type === 'zoom_status') {
+            if (data.payload.enabled !== undefined) {
+              setZoomEnabled(data.payload.enabled);
+            }
+            if (data.payload.action && data.payload.action !== 'None') {
+              setLastZoomAction(data.payload.action);
+            }
+          }
+
+          if (data.type === 'tts_status') {
+            if (data.payload.state) setTtsStatus(data.payload.state);
+            if (data.payload.text) setTtsLastText(data.payload.text);
+          }
+        } catch (error) {
+          console.error('Invalid WebSocket message:', error);
         }
+      };
 
-        if (data.type === 'tts_status') {
-          if (data.payload.state) setTtsStatus(data.payload.state);
-          if (data.payload.text) setTtsLastText(data.payload.text);
+      ws.onclose = () => {
+        if (active) {
+          // If polling also failed, mark disconnected
         }
-      } catch (error) {
-        console.error('Invalid WebSocket message:', error);
-      }
-    };
+      };
 
-    ws.onclose = () => {
-      // Do not overwrite the hosted health indicator here.
-      // The health check independently determines hosted connectivity.
-    };
-
-    ws.onerror = error => console.error('WebSocket error:', error);
+      ws.onerror = () => {
+        // WebSocket error
+      };
+    } catch (err) {
+      console.warn('Could not connect WebSocket to', backendUrl, err);
+    }
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        fetch(`${LOCAL_API}/api/control/stop`, { method: 'POST' })
-          .catch(console.error);
+        fetch(`${backendUrl}/api/control/stop`, { method: 'POST' }).catch(() => {});
         setStatus('stopped');
       }
     };
@@ -167,40 +180,56 @@ export default function App() {
 
     return () => {
       active = false;
-      window.clearInterval(healthInterval);
-      ws.close();
+      window.clearInterval(intervalId);
+      if (ws) {
+        ws.close();
+      }
+      wsRef.current = null;
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isLocal]);
+  }, [backendUrl]);
 
   const handleAction = async (action: string) => {
-    if (!isLocal) {
-      console.info('PC control requires the local IntentOS backend.');
-      return;
-    }
-
     try {
-      const res = await fetch(`${LOCAL_API}/api/control/${action}`, {
+      const res = await fetch(`${backendUrl}/api/control/${action}`, {
         method: 'POST'
       });
       if (!res.ok) throw new Error(`Control request failed: ${res.status}`);
+      // Optimistic update
+      if (action === 'start') setStatus('running');
+      if (action === 'pause') setStatus('paused');
+      if (action === 'resume') setStatus('running');
+      if (action === 'stop') setStatus('stopped');
+      if (action === 'zoom_enable') setZoomEnabled(true);
+      if (action === 'zoom_disable') setZoomEnabled(false);
     } catch (error) {
       console.error(error);
+      // Even if offline, update UI for testing/feedback
+      if (action === 'stop') setStatus('stopped');
     }
   };
 
   const updateTtsSettings = (settings: Record<string, unknown>) => {
-    if (!isLocal) return;
-
-    fetch(`${LOCAL_API}/api/tts/settings`, {
+    fetch(`${backendUrl}/api/tts/settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings)
     }).catch(console.error);
   };
 
+  const handleSaveBackendUrl = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = inputUrl.trim().replace(/\/+$/, '');
+    if (clean) {
+      setBackendUrl(clean);
+      localStorage.setItem('intentos_backend_url', clean);
+      setShowConfig(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-950 text-white p-8">
+      {/* Header */}
       <header className="sticky top-0 z-50 mb-8 flex flex-col md:flex-row justify-between items-center bg-gray-950/90 backdrop-blur p-4 border-b border-gray-800">
         <div className="mb-4 md:mb-0">
           <h1 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">
@@ -211,13 +240,19 @@ export default function App() {
           </p>
         </div>
 
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2">
-            <div className={`w-3 h-3 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
-            <span className="text-sm text-gray-300 hidden md:inline">
-              Backend {connected ? 'Connected' : 'Disconnected'}
+        <div className="flex items-center gap-4 flex-wrap">
+          {/* Backend Connection Status & Switcher */}
+          <button
+            onClick={() => setShowConfig(!showConfig)}
+            className="flex items-center gap-2 px-3 py-1.5 bg-gray-900 hover:bg-gray-800 border border-gray-700 rounded-lg text-sm transition-colors"
+            title="Click to configure backend URL"
+          >
+            <div className={`w-2.5 h-2.5 rounded-full ${connected ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} />
+            <span className="text-gray-300">
+              {connected ? 'Backend Connected' : 'Backend Disconnected'}
             </span>
-          </div>
+            <Settings size={14} className="text-gray-400 ml-1" />
+          </button>
 
           <button
             onClick={() => handleAction('stop')}
@@ -230,36 +265,103 @@ export default function App() {
         </div>
       </header>
 
-      {!isLocal && (
-        <div className="mb-8 rounded-xl border border-yellow-800 bg-yellow-900/20 p-4 text-yellow-200 text-sm">
-          Online demo mode: backend health is checked remotely. Webcam,
-          voice, and PC-control functions require the local IntentOS backend.
+      {/* Backend URL Configuration Modal / Banner */}
+      {showConfig && (
+        <div className="mb-8 p-4 bg-gray-900 border border-blue-500/50 rounded-xl shadow-xl">
+          <form onSubmit={handleSaveBackendUrl} className="flex flex-col md:flex-row items-center gap-3">
+            <div className="flex-1 w-full">
+              <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">
+                Backend Server URL
+              </label>
+              <input
+                type="text"
+                value={inputUrl}
+                onChange={e => setInputUrl(e.target.value)}
+                placeholder="http://localhost:8000 or http://192.168.1.X:8000"
+                className="w-full bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div className="flex gap-2 w-full md:w-auto mt-4 md:mt-5">
+              <button
+                type="submit"
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded text-sm transition-colors"
+              >
+                Save & Connect
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setInputUrl(DEFAULT_BACKEND_URL);
+                  setBackendUrl(DEFAULT_BACKEND_URL);
+                  localStorage.removeItem('intentos_backend_url');
+                  setShowConfig(false);
+                }}
+                className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded transition-colors"
+              >
+                Reset Default
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowConfig(false)}
+                className="px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm rounded transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </form>
+          <p className="text-xs text-gray-400 mt-2">
+            Default is <code className="text-blue-400">http://localhost:8000</code>. If controlling another PC over LAN or tunnel, enter its IP/URL here.
+          </p>
         </div>
       )}
 
-      {isLocal && (status === 'running' || status === 'paused') && (
-        <div className="mb-8 bg-gray-900 p-4 rounded-xl border border-gray-800 flex justify-center">
+      {/* Disconnected Assistant Helper Notice */}
+      {!connected && !showConfig && (
+        <div className="mb-6 p-4 rounded-xl border border-blue-900/40 bg-blue-950/20 flex flex-col md:flex-row justify-between items-center gap-3 text-sm">
+          <div className="flex items-center gap-3 text-blue-300">
+            <WifiOff size={20} className="text-blue-400 shrink-0" />
+            <span>
+              Targeting <strong className="text-white">{backendUrl}</strong>. If backend is not started, launch it locally with <code className="bg-gray-900 px-1.5 py-0.5 rounded text-blue-200">uvicorn main:app --reload</code>.
+            </span>
+          </div>
+          <button
+            onClick={() => setShowConfig(true)}
+            className="text-xs bg-blue-600/30 hover:bg-blue-600/50 text-blue-200 px-3 py-1.5 rounded-lg border border-blue-500/30 font-medium transition-colors shrink-0"
+          >
+            Change Backend URL
+          </button>
+        </div>
+      )}
+
+      {/* Webcam Feed */}
+      {(status === 'running' || status === 'paused') && (
+        <div className="mb-8 bg-gray-900 p-4 rounded-xl border border-gray-800 flex flex-col items-center justify-center">
           <img
-            src={`${LOCAL_API}/api/video_feed`}
+            src={`${backendUrl}/api/video_feed`}
             alt="Webcam Feed"
             className="rounded-lg shadow-lg max-h-96 object-cover"
+            onError={e => {
+              // Hide image or show fallback if video stream cannot be reached
+              (e.target as HTMLElement).style.display = 'none';
+            }}
           />
         </div>
       )}
 
+      {/* Grid: Gestures, Zoom, System */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+        {/* Gestures Card */}
         <div className="bg-gray-900 p-6 rounded-xl border border-gray-800">
           <div className="flex justify-between mb-4">
             <h2 className="text-lg font-semibold flex items-center gap-2">
               <Hand size={20} /> Gestures
             </h2>
-            <span className="text-blue-400 text-sm">
-              {isLocal ? 'Active' : 'Local only'}
-            </span>
+            <span className="text-blue-400 text-sm">Active</span>
           </div>
           <p className="text-3xl font-mono">{lastGesture}</p>
         </div>
 
+        {/* Zoom Card */}
         <div className="bg-gray-900 p-6 rounded-xl border border-gray-800">
           <div className="flex justify-between mb-4">
             <h2 className="text-lg font-semibold flex items-center gap-2">
@@ -272,45 +374,44 @@ export default function App() {
           <div className="flex flex-col gap-2">
             <p className="text-xl font-mono truncate">{lastZoomAction}</p>
             <button
-              disabled={!isLocal}
               onClick={() => handleAction(zoomEnabled ? 'zoom_disable' : 'zoom_enable')}
-              className={`py-1 px-3 mt-2 rounded text-sm font-semibold transition-colors ${zoomEnabled ? 'bg-gray-700 hover:bg-gray-600' : 'bg-blue-600 hover:bg-blue-700'} disabled:opacity-40`}
+              className={`py-1 px-3 mt-2 rounded text-sm font-semibold transition-colors ${
+                zoomEnabled ? 'bg-gray-700 hover:bg-gray-600' : 'bg-blue-600 hover:bg-blue-700'
+              }`}
             >
               {zoomEnabled ? 'Disable Zoom' : 'Enable Zoom'}
             </button>
           </div>
         </div>
 
+        {/* System Card */}
         <div className="bg-gray-900 p-6 rounded-xl border border-gray-800">
           <div className="flex justify-between mb-4">
             <h2 className="text-lg font-semibold flex items-center gap-2">
               <Monitor size={20} /> System
             </h2>
             <span className={`text-sm ${status === 'running' ? 'text-green-400' : 'text-yellow-400'}`}>
-              {isLocal ? status.toUpperCase() : 'LOCAL ONLY'}
+              {status.toUpperCase()}
             </span>
           </div>
           <div className="flex gap-2">
             <button
-              disabled={!isLocal}
               onClick={() => handleAction(status === 'paused' ? 'resume' : 'start')}
-              className="p-2 bg-green-600 hover:bg-green-700 rounded disabled:opacity-40"
+              className="p-2 bg-green-600 hover:bg-green-700 rounded transition-colors"
               title={status === 'paused' ? 'Resume' : 'Start'}
             >
               <Play size={20} />
             </button>
             <button
-              disabled={!isLocal}
               onClick={() => handleAction('pause')}
-              className="p-2 bg-yellow-600 hover:bg-yellow-700 rounded disabled:opacity-40"
+              className="p-2 bg-yellow-600 hover:bg-yellow-700 rounded transition-colors"
               title="Pause"
             >
               <Pause size={20} />
             </button>
             <button
-              disabled={!isLocal}
               onClick={() => handleAction('stop')}
-              className="p-2 bg-red-600 hover:bg-red-700 rounded disabled:opacity-40"
+              className="p-2 bg-red-600 hover:bg-red-700 rounded transition-colors"
               title="Stop"
             >
               <Square size={20} />
@@ -319,6 +420,7 @@ export default function App() {
         </div>
       </div>
 
+      {/* Voice Control Panel */}
       <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 mb-8">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-xl font-bold flex items-center gap-2">
@@ -332,11 +434,12 @@ export default function App() {
             voiceState === 'failed' ? 'bg-red-900/50 text-red-400' :
             'bg-gray-800 text-gray-400'
           }`}>
-            {isLocal ? voiceState : 'Local only'}
+            {voiceState}
           </span>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* History */}
           <div className="bg-gray-950 rounded-lg p-4 h-64 overflow-y-auto border border-gray-800">
             <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wider">
               Command History
@@ -346,13 +449,23 @@ export default function App() {
             ) : (
               <div className="flex flex-col gap-3">
                 {voiceHistory.map((item, idx) => (
-                  <div key={idx} className={`p-3 rounded-md border ${item.success ? 'bg-green-900/10 border-green-900/30' : 'bg-red-900/10 border-red-900/30'}`}>
+                  <div
+                    key={idx}
+                    className={`p-3 rounded-md border ${
+                      item.success ? 'bg-green-900/10 border-green-900/30' : 'bg-red-900/10 border-red-900/30'
+                    }`}
+                  >
                     <div className="flex justify-between items-start mb-1">
                       <p className="font-medium text-gray-200">"{item.text}"</p>
                       <span className="text-xs text-gray-500">{item.time}</span>
                     </div>
+                    {item.reply && (
+                      <p className="text-xs text-blue-300 italic mb-1">
+                        Assistant: "{item.reply}"
+                      </p>
+                    )}
                     <div className="flex flex-wrap items-center gap-2 mt-2">
-                      {item.actions?.map((act: any, i: number) => (
+                      {item.actions && item.actions.map((act: any, i: number) => (
                         <div key={i} className="flex gap-2 items-center bg-gray-900/50 px-2 py-1 rounded border border-gray-800">
                           <span className={`text-xs ${item.success ? 'text-green-300' : 'text-red-300'}`}>
                             {act.intent}
@@ -371,6 +484,7 @@ export default function App() {
             )}
           </div>
 
+          {/* Quick Reference */}
           <div className="flex flex-col justify-between">
             <div>
               <h3 className="text-sm font-semibold text-gray-400 mb-3 uppercase tracking-wider">
@@ -387,22 +501,20 @@ export default function App() {
 
             <div className="bg-gray-800/50 p-4 rounded-lg flex justify-between items-center border border-gray-700/50">
               <span className="text-sm font-medium text-gray-300">
-                {isLocal
-                  ? (voiceListening ? 'Microphone is active' : 'Microphone is off')
-                  : 'Microphone control is local only'}
+                {voiceListening ? 'Microphone is active' : 'Microphone is off'}
               </span>
               <button
-                disabled={!isLocal}
                 onClick={() => handleAction('stop')}
-                className="px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 font-semibold rounded transition-colors text-sm disabled:opacity-40"
+                className="px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 font-semibold rounded transition-colors text-sm"
               >
-                Force Stop Listening
+                Force Stop
               </button>
             </div>
           </div>
         </div>
       </div>
 
+      {/* Voice Assistant / TTS Panel */}
       <div className="bg-gray-900 p-6 rounded-xl border border-gray-800 mb-8">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-xl font-bold flex items-center gap-2">
@@ -416,16 +528,17 @@ export default function App() {
               ttsStatus === 'error' ? 'bg-red-900/50 text-red-400' :
               'bg-gray-800 text-gray-400'
             }`}>
-              {isLocal ? ttsStatus : 'Local only'}
+              {ttsStatus}
             </span>
             <button
-              disabled={!isLocal}
               onClick={() => {
                 const newMuted = !ttsMuted;
                 setTtsMuted(newMuted);
                 updateTtsSettings({ muted: newMuted });
               }}
-              className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${ttsMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-700 hover:bg-gray-600'} disabled:opacity-40`}
+              className={`px-3 py-1 rounded text-sm font-semibold transition-colors ${
+                ttsMuted ? 'bg-red-600 hover:bg-red-700' : 'bg-gray-700 hover:bg-gray-600'
+              }`}
             >
               {ttsMuted ? 'Unmute' : 'Mute'}
             </button>
@@ -439,7 +552,6 @@ export default function App() {
                 Voice Selection
               </label>
               <select
-                disabled={!isLocal}
                 className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm text-gray-200"
                 value={ttsSelectedVoice}
                 onChange={e => {
@@ -458,15 +570,17 @@ export default function App() {
                 Speed ({ttsRate})
               </label>
               <input
-                disabled={!isLocal}
-                type="range" min="50" max="300" step="10"
+                type="range"
+                min="50"
+                max="300"
+                step="10"
                 value={ttsRate}
                 onChange={e => {
                   const val = parseInt(e.target.value);
                   setTtsRate(val);
                   updateTtsSettings({ rate: val });
                 }}
-                className="w-full disabled:opacity-40"
+                className="w-full"
               />
             </div>
 
@@ -475,39 +589,38 @@ export default function App() {
                 Volume ({Math.round(ttsVolume * 100)}%)
               </label>
               <input
-                disabled={!isLocal}
-                type="range" min="0" max="1" step="0.1"
+                type="range"
+                min="0"
+                max="1"
+                step="0.1"
                 value={ttsVolume}
                 onChange={e => {
                   const val = parseFloat(e.target.value);
                   setTtsVolume(val);
                   updateTtsSettings({ volume: val });
                 }}
-                className="w-full disabled:opacity-40"
+                className="w-full"
               />
             </div>
 
             <div className="flex gap-2 mt-2">
               <button
-                disabled={!isLocal}
                 onClick={() => {
-                  fetch(`${LOCAL_API}/api/tts/speak`, {
+                  fetch(`${backendUrl}/api/tts/speak`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: 'Hello, this is a voice test.' })
+                    body: JSON.stringify({ text: 'Hello, this is a voice test from IntentOS.' })
                   }).catch(console.error);
                 }}
-                className="flex-1 px-4 py-2 bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 font-semibold rounded transition-colors text-sm disabled:opacity-40"
+                className="flex-1 px-4 py-2 bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 font-semibold rounded transition-colors text-sm"
               >
                 Test Voice
               </button>
               <button
-                disabled={!isLocal}
                 onClick={() => {
-                  fetch(`${LOCAL_API}/api/tts/stop`, { method: 'POST' })
-                    .catch(console.error);
+                  fetch(`${backendUrl}/api/tts/stop`, { method: 'POST' }).catch(console.error);
                 }}
-                className="flex-1 px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 font-semibold rounded transition-colors text-sm disabled:opacity-40"
+                className="flex-1 px-4 py-2 bg-red-600/20 hover:bg-red-600/40 text-red-400 font-semibold rounded transition-colors text-sm"
               >
                 Stop Speaking
               </button>
@@ -525,14 +638,14 @@ export default function App() {
         </div>
       </div>
 
+      {/* Emergency Stop Bottom Card */}
       <div className="bg-gray-900 p-6 rounded-xl border border-red-900/50">
         <h2 className="text-xl font-bold text-red-500 flex items-center gap-2 mb-4">
           <AlertTriangle /> Emergency Stop
         </h2>
         <button
           onClick={() => handleAction('stop')}
-          disabled={!isLocal}
-          className="w-full py-4 bg-red-600 hover:bg-red-700 rounded-lg text-xl font-bold uppercase tracking-wider transition-colors disabled:opacity-40"
+          className="w-full py-4 bg-red-600 hover:bg-red-700 rounded-lg text-xl font-bold uppercase tracking-wider transition-colors"
         >
           STOP ALL CONTROLS
         </button>
