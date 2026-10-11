@@ -53,7 +53,10 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const handsRef = useRef<any>(null);
+  const cameraRef = useRef<any>(null);
   const recognitionRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -88,32 +91,148 @@ export default function App() {
     }
   }, [ttsVoices.length, ttsSelectedVoice]);
 
-  // Start Browser Webcam
+  // Start Browser Webcam & In-Browser MediaPipe Hand Tracking
   const startBrowserCamera = async () => {
     try {
       if (mediaStreamRef.current) {
         mediaStreamRef.current.getTracks().forEach(t => t.stop());
       }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: { ideal: 640 }, height: { ideal: 480 } }
       });
       mediaStreamRef.current = stream;
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current?.play().catch(console.error);
+        };
       }
       setBrowserCameraActive(true);
-      showToast('Browser Webcam Activated');
+      showToast('Live Camera Started with MediaPipe Hand Tracking');
+
+      // Initialize In-Browser MediaPipe Hands
+      const HandsClass = (window as any).Hands;
+      const CameraClass = (window as any).Camera;
+
+      if (HandsClass && videoRef.current) {
+        const hands = new HandsClass({
+          locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+          maxNumHands: 1,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5
+        });
+
+        hands.onResults((results: any) => {
+          const canvas = canvasRef.current;
+          if (!canvas) return;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return;
+
+          ctx.save();
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+          if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const landmarks = results.multiHandLandmarks[0];
+
+            // Draw Hand Skeleton Connections
+            const drawUtils = (window as any);
+            if (drawUtils.drawConnectors && drawUtils.drawLandmarks && drawUtils.HAND_CONNECTIONS) {
+              drawUtils.drawConnectors(ctx, landmarks, drawUtils.HAND_CONNECTIONS, {
+                color: '#00FF88',
+                lineWidth: 4
+              });
+              drawUtils.drawLandmarks(ctx, landmarks, {
+                color: '#FF0055',
+                lineWidth: 2,
+                radius: 4
+              });
+            }
+
+            // Real-Time Gesture Classification
+            const thumbTip = landmarks[4];
+            const indexTip = landmarks[8];
+            const middleTip = landmarks[12];
+            const ringTip = landmarks[16];
+            const pinkyTip = landmarks[20];
+
+            const indexPip = landmarks[6];
+            const middlePip = landmarks[10];
+            const ringPip = landmarks[14];
+            const pinkyPip = landmarks[18];
+
+            const indexUp = indexTip.y < indexPip.y;
+            const middleUp = middleTip.y < middlePip.y;
+            const ringUp = ringTip.y < ringPip.y;
+            const pinkyUp = pinkyTip.y < pinkyPip.y;
+
+            const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+
+            let detected = "None";
+            if (!indexUp && !middleUp && !ringUp && !pinkyUp) {
+              detected = "Closed Fist";
+            } else if (pinchDist < 0.065) {
+              detected = "Pinch";
+            } else if (indexUp && middleUp && ringUp && pinkyUp) {
+              detected = "Open Palm";
+            } else if (indexUp && middleUp && !ringUp && !pinkyUp) {
+              detected = "Two Fingers";
+            } else if (indexUp && !middleUp && !ringUp && !pinkyUp) {
+              detected = "Index Extended";
+            }
+
+            if (detected !== "None") {
+              setLastGesture(detected);
+            }
+          }
+          ctx.restore();
+        });
+
+        if (CameraClass && videoRef.current) {
+          const cam = new CameraClass(videoRef.current, {
+            onFrame: async () => {
+              if (videoRef.current && hands) {
+                await hands.send({ image: videoRef.current });
+              }
+            },
+            width: 640,
+            height: 480
+          });
+          cam.start();
+          cameraRef.current = cam;
+        }
+
+        handsRef.current = hands;
+      }
     } catch (err) {
       console.warn('Browser webcam error:', err);
       showToast('Could not access browser webcam');
     }
   };
 
-  // Stop Browser Webcam
+  // Stop Browser Webcam & MediaPipe
   const stopBrowserCamera = () => {
+    if (cameraRef.current) {
+      try { cameraRef.current.stop(); } catch (_) {}
+      cameraRef.current = null;
+    }
+    if (handsRef.current) {
+      try { handsRef.current.close(); } catch (_) {}
+      handsRef.current = null;
+    }
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach(t => t.stop());
       mediaStreamRef.current = null;
+    }
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
     setBrowserCameraActive(false);
   };
@@ -152,7 +271,6 @@ export default function App() {
       rec.onerror = (e: any) => {
         console.warn('Speech recognition error:', e);
         if (status === 'running') {
-          // Restart after short delay
           setTimeout(() => {
             try { rec.start(); } catch (_) {}
           }, 1000);
@@ -185,7 +303,7 @@ export default function App() {
     setVoiceState('Idle');
   };
 
-  // Handle Recognized Voice Command (Works in browser & forwards to backend)
+  // Handle Recognized Voice Command
   const handleVoiceInput = (text: string) => {
     const lower = text.toLowerCase();
     let reply = "Command recognized.";
@@ -259,7 +377,6 @@ export default function App() {
   // Lifecycle for Camera and Speech based on status
   useEffect(() => {
     if (status === 'running') {
-      // If we don't have python stream or user enabled browser camera, start browser webcam
       if (!connected || useBrowserCamera) {
         startBrowserCamera();
       }
@@ -363,7 +480,7 @@ export default function App() {
     if (action === 'start') {
       setStatus('running');
       showToast('System Started (Camera & Voice Live)');
-      speakTts("IntentOS Active. Camera and Voice listening.");
+      speakTts("IntentOS Active. Tracking hand gestures and voice.");
     } else if (action === 'pause') {
       setStatus('paused');
       showToast('System Paused');
@@ -519,13 +636,13 @@ export default function App() {
         </div>
       )}
 
-      {/* Live Camera Viewport */}
+      {/* Live Camera Viewport with Hand Landmark Overlay */}
       {(status === 'running' || status === 'paused') && (
         <div className="mb-8 bg-gray-900 p-4 rounded-xl border border-gray-800 flex flex-col items-center justify-center relative">
           <div className="flex justify-between items-center w-full mb-3 px-2">
             <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider flex items-center gap-1.5">
               <Camera size={14} className="text-blue-400" />
-              Live Camera Stream
+              Live Camera Stream & Hand Skeleton
             </span>
             <button
               onClick={() => {
@@ -540,36 +657,43 @@ export default function App() {
             </button>
           </div>
 
-          {/* Browser HTML5 Video Stream */}
-          {(useBrowserCamera || !connected) ? (
-            <div className="relative">
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="rounded-lg shadow-lg max-h-96 object-cover transform -scale-x-100 border border-gray-700"
+          {/* Video & Canvas MediaPipe Container */}
+          <div className="relative w-full max-w-xl mx-auto overflow-hidden rounded-lg shadow-lg border border-gray-700 bg-black flex justify-center items-center aspect-video">
+            {(useBrowserCamera || !connected) ? (
+              <>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-full object-cover transform -scale-x-100"
+                />
+                <canvas
+                  ref={canvasRef}
+                  width={640}
+                  height={480}
+                  className="absolute inset-0 w-full h-full pointer-events-none transform -scale-x-100"
+                />
+                <div className="absolute top-3 left-3 bg-blue-600/85 backdrop-blur px-2.5 py-1 rounded text-xs font-semibold text-white flex items-center gap-1.5 shadow-md">
+                  <Hand size={13} className="text-green-300" />
+                  MediaPipe Hand Tracking: <span className="text-yellow-300 font-bold ml-1">{lastGesture}</span>
+                </div>
+              </>
+            ) : (
+              <img
+                src={`${backendUrl}/api/video_feed`}
+                alt="MediaPipe Webcam Feed"
+                className="w-full h-full object-cover"
+                onError={() => {
+                  setUseBrowserCamera(true);
+                  startBrowserCamera();
+                }}
               />
-              <div className="absolute top-3 left-3 bg-blue-600/80 backdrop-blur px-2.5 py-1 rounded text-xs font-semibold text-white flex items-center gap-1.5">
-                <Video size={13} /> Live Browser Webcam Active
-              </div>
-            </div>
-          ) : (
-            /* Python OpenCV MJPEG Stream */
-            <img
-              src={`${backendUrl}/api/video_feed`}
-              alt="MediaPipe Webcam Feed"
-              className="rounded-lg shadow-lg max-h-96 object-cover border border-gray-700"
-              onError={() => {
-                // If python stream fails, switch to browser webcam automatically!
-                setUseBrowserCamera(true);
-                startBrowserCamera();
-              }}
-            />
-          )}
+            )}
+          </div>
 
           <p className="text-xs text-gray-400 mt-2">
-            Move your hand in front of the camera to track gestures.
+            Show your hand to the camera. Green lines and red points track your hand landmarks in real time.
           </p>
         </div>
       )}
@@ -587,22 +711,25 @@ export default function App() {
             </span>
           </div>
           <p className="text-3xl font-mono text-blue-400">{lastGesture}</p>
+          <p className="text-xs text-gray-400 mt-1">
+            Index Extended: Move cursor | Pinch: Click | Two Fingers: Scroll
+          </p>
           <div className="mt-3 flex flex-wrap gap-1.5">
             <button
-              onClick={() => { setLastGesture('Index Extended'); showToast('Simulating: Index Extended (Cursor)'); }}
-              className="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded text-gray-300"
+              onClick={() => { setLastGesture('Index Extended'); showToast('Gesture: Index Extended (Cursor)'); }}
+              className="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded text-gray-300 cursor-pointer"
             >
               Index Extended
             </button>
             <button
-              onClick={() => { setLastGesture('Pinch'); showToast('Simulating: Pinch (Click)'); }}
-              className="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded text-gray-300"
+              onClick={() => { setLastGesture('Pinch'); showToast('Gesture: Pinch (Click)'); }}
+              className="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded text-gray-300 cursor-pointer"
             >
               Pinch
             </button>
             <button
-              onClick={() => { setLastGesture('Two Fingers'); showToast('Simulating: Two Fingers (Scroll)'); }}
-              className="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded text-gray-300"
+              onClick={() => { setLastGesture('Two Fingers'); showToast('Gesture: Two Fingers (Scroll)'); }}
+              className="text-xs bg-gray-800 hover:bg-gray-700 px-2 py-1 rounded text-gray-300 cursor-pointer"
             >
               Two Fingers
             </button>
