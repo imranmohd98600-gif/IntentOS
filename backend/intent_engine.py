@@ -69,11 +69,8 @@ class IntentEngine:
             self.pc_controller.handle_gesture(payload)
         elif event_type == "voice":
             if not payload.get("success"):
-                self.tts_engine.speak("I didn't quite catch that.")
                 return
                 
-            self._generate_speech_response(payload)
-            
             actions = payload.get("actions", [])
             
             for action_item in actions:
@@ -156,7 +153,6 @@ class IntentEngine:
             self.is_paused = False
             self.gesture_engine.start()
             self.voice_engine.start()
-            self.tts_engine.start()
             self.pc_controller.enable()
             self.event_manager.trigger_event("status_change", {"status": "running"})
             print("IntentOS Started")
@@ -184,7 +180,6 @@ class IntentEngine:
         self.is_paused = False
         self.gesture_engine.stop()
         self.voice_engine.stop()
-        self.tts_engine.stop_service()
         self.pc_controller.disable()
         self.event_manager.trigger_event("status_change", {"status": "stopped"})
         print("IntentOS Stopped")

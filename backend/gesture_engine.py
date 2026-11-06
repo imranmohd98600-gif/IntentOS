@@ -91,11 +91,22 @@ class GestureEngine:
         ring_pip = hand_landmarks.landmark[self.mp_hands.HandLandmark.RING_FINGER_PIP]
         pinky_pip = hand_landmarks.landmark[self.mp_hands.HandLandmark.PINKY_PIP]
         
-        # Check if fingers are up (y is smaller when higher on screen)
-        index_up = index_tip.y < index_pip.y
-        middle_up = middle_tip.y < middle_pip.y
-        ring_up = ring_tip.y < ring_pip.y
-        pinky_up = pinky_tip.y < pinky_pip.y
+        # Distance checks for rotation-independent extension detection
+        index_dist = self._calculate_distance(wrist, index_tip)
+        index_pip_dist = self._calculate_distance(wrist, index_pip)
+        index_up = (index_tip.y < index_pip.y) or (index_dist > index_pip_dist * 1.05)
+        
+        middle_dist = self._calculate_distance(wrist, middle_tip)
+        middle_pip_dist = self._calculate_distance(wrist, middle_pip)
+        middle_up = (middle_tip.y < middle_pip.y) or (middle_dist > middle_pip_dist * 1.05)
+        
+        ring_dist = self._calculate_distance(wrist, ring_tip)
+        ring_pip_dist = self._calculate_distance(wrist, ring_pip)
+        ring_up = (ring_tip.y < ring_pip.y) or (ring_dist > ring_pip_dist * 1.05)
+        
+        pinky_dist = self._calculate_distance(wrist, pinky_tip)
+        pinky_pip_dist = self._calculate_distance(wrist, pinky_pip)
+        pinky_up = (pinky_tip.y < pinky_pip.y) or (pinky_dist > pinky_pip_dist * 1.05)
         
         pinch_dist = self._calculate_distance(thumb_tip, index_tip)
         norm_pinch = pinch_dist / (hand_size + 1e-6)
@@ -108,13 +119,13 @@ class GestureEngine:
             gesture = "Closed Fist"
         elif index_up and middle_up and ring_up and pinky_up:
             gesture = "Open Palm"
-        elif pinch_dist < 0.05:
-            gesture = "Pinch"
         elif index_up and middle_up and not ring_up and not pinky_up:
             gesture = "Two Fingers"
             # For finger-only scrolling, use relative distance from wrist to fingertips
             avg_finger_y = (index_tip.y + middle_tip.y) / 2.0
             out_y = avg_finger_y - wrist.y
+        elif pinch_dist < 0.05 or norm_pinch < 0.25:
+            gesture = "Pinch"
         elif index_up and not middle_up and not ring_up and not pinky_up:
             gesture = "Index Extended"
 

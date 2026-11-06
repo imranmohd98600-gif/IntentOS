@@ -120,7 +120,10 @@ class PCController:
             self.last_log_time = current_time
 
         # Actually move the mouse
-        pyautogui.moveTo(smooth_x, smooth_y, _pause=False)
+        try:
+            pyautogui.moveTo(smooth_x, smooth_y, _pause=False)
+        except Exception:
+            pass
 
     def _click(self):
         current_time = time.time()
