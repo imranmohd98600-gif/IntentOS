@@ -100,8 +100,8 @@ class VoiceEngine:
                 # Filter out unknowns
                 valid_actions = [a for a in actions if a.get("intent") != "unknown"]
                 
-                if valid_actions or reply:
-                    print(f"[VoiceEngine] Command accepted with {len(valid_actions)} actions. Reply: {reply}")
+                if valid_actions:
+                    print(f"[VoiceEngine] Command accepted with {len(valid_actions)} actions: {valid_actions}. Reply: {reply}")
                     self.event_manager.trigger_event("voice_status", {"listening": True, "state": "executing"})
                     self.event_manager.trigger_event("voice", {
                         "text": text,
@@ -115,26 +115,29 @@ class VoiceEngine:
                     if len(self.context) > 5:
                         self.context = self.context[-5:]
                 else:
+                    print(f"[VoiceEngine] Unrecognized command: '{text}'")
                     self.event_manager.trigger_event("voice_status", {"listening": True, "state": "failed"})
                     self.event_manager.trigger_event("voice", {
                         "text": text,
-                        "actions": [{"intent": "Unknown"}],
+                        "actions": [{"intent": "Unknown", "params": {}}],
+                        "reply": reply or "Command not recognized",
                         "success": False
                     })
                     
                 time.sleep(0.5) # Prevent instant re-trigger
                     
-            except sr.WaitTimeoutError:
-                # Normal timeout when no one speaks
-                continue
-            except sr.UnknownValueError:
-                self.event_manager.trigger_event("voice_status", {"listening": True, "state": "failed"})
-                # Unintelligible
-                pass
-            except sr.RequestError as e:
-                print(f"[VoiceEngine] Online recognition service error: {e}")
-                self.event_manager.trigger_event("error", {"message": f"Online voice service unavailable: {e}"})
-                time.sleep(2)
             except Exception as e:
-                print(f"[VoiceEngine] Unexpected error: {e}")
-                time.sleep(1)
+                err_name = type(e).__name__
+                if err_name == "WaitTimeoutError" or "WaitTimeout" in str(type(e)):
+                    continue
+                elif err_name == "UnknownValueError" or "UnknownValue" in str(type(e)):
+                    self.event_manager.trigger_event("voice_status", {"listening": True, "state": "failed"})
+                    continue
+                elif err_name == "RequestError" or "RequestError" in str(type(e)):
+                    print(f"[VoiceEngine] Online recognition service error: {e}")
+                    self.event_manager.trigger_event("error", {"message": f"Online voice service unavailable: {e}"})
+                    time.sleep(2)
+                else:
+                    print(f"[VoiceEngine] Unexpected error: {e}")
+                    time.sleep(1)
+

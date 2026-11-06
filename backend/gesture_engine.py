@@ -80,33 +80,41 @@ class GestureEngine:
         ring_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.RING_FINGER_TIP]
         pinky_tip = hand_landmarks.landmark[self.mp_hands.HandLandmark.PINKY_TIP]
         
-        wrist = hand_landmarks.landmark[self.mp_hands.HandLandmark.WRIST]
+        # DIP joints
+        index_dip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_DIP]
+        middle_dip = hand_landmarks.landmark[self.mp_hands.HandLandmark.MIDDLE_FINGER_DIP]
+        ring_dip = hand_landmarks.landmark[self.mp_hands.HandLandmark.RING_FINGER_DIP]
+        pinky_dip = hand_landmarks.landmark[self.mp_hands.HandLandmark.PINKY_DIP]
         
-        index_mcp = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_MCP]
-        hand_size = self._calculate_distance(wrist, index_mcp)
-        
-        # Base/Pip for finger fold detection
+        # PIP joints
         index_pip = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_PIP]
         middle_pip = hand_landmarks.landmark[self.mp_hands.HandLandmark.MIDDLE_FINGER_PIP]
         ring_pip = hand_landmarks.landmark[self.mp_hands.HandLandmark.RING_FINGER_PIP]
         pinky_pip = hand_landmarks.landmark[self.mp_hands.HandLandmark.PINKY_PIP]
+
+        # MCP knuckles
+        index_mcp = hand_landmarks.landmark[self.mp_hands.HandLandmark.INDEX_FINGER_MCP]
+        middle_mcp = hand_landmarks.landmark[self.mp_hands.HandLandmark.MIDDLE_FINGER_MCP]
+        ring_mcp = hand_landmarks.landmark[self.mp_hands.HandLandmark.RING_FINGER_MCP]
+        pinky_mcp = hand_landmarks.landmark[self.mp_hands.HandLandmark.PINKY_MCP]
+
+        wrist = hand_landmarks.landmark[self.mp_hands.HandLandmark.WRIST]
+        hand_size = self._calculate_distance(wrist, index_mcp)
         
-        # Distance checks for rotation-independent extension detection
-        index_dist = self._calculate_distance(wrist, index_tip)
-        index_pip_dist = self._calculate_distance(wrist, index_pip)
-        index_up = (index_tip.y < index_pip.y) or (index_dist > index_pip_dist * 1.05)
-        
-        middle_dist = self._calculate_distance(wrist, middle_tip)
-        middle_pip_dist = self._calculate_distance(wrist, middle_pip)
-        middle_up = (middle_tip.y < middle_pip.y) or (middle_dist > middle_pip_dist * 1.05)
-        
-        ring_dist = self._calculate_distance(wrist, ring_tip)
-        ring_pip_dist = self._calculate_distance(wrist, ring_pip)
-        ring_up = (ring_tip.y < ring_pip.y) or (ring_dist > ring_pip_dist * 1.05)
-        
-        pinky_dist = self._calculate_distance(wrist, pinky_tip)
-        pinky_pip_dist = self._calculate_distance(wrist, pinky_pip)
-        pinky_up = (pinky_tip.y < pinky_pip.y) or (pinky_dist > pinky_pip_dist * 1.05)
+        def is_extended(tip, dip, pip, mcp):
+            # Upright check: tip is above pip and dip (in image coords, smaller y = higher)
+            upright = (tip.y < pip.y) and (tip.y < dip.y)
+            # Distance from wrist check (rotation invariant)
+            d_tip = self._calculate_distance(wrist, tip)
+            d_pip = self._calculate_distance(wrist, pip)
+            d_mcp = self._calculate_distance(wrist, mcp)
+            far = (d_tip > d_pip * 1.15) and (d_tip > d_mcp * 1.25)
+            return upright or far
+            
+        index_up = is_extended(index_tip, index_dip, index_pip, index_mcp)
+        middle_up = is_extended(middle_tip, middle_dip, middle_pip, middle_mcp)
+        ring_up = is_extended(ring_tip, ring_dip, ring_pip, ring_mcp)
+        pinky_up = is_extended(pinky_tip, pinky_dip, pinky_pip, pinky_mcp)
         
         pinch_dist = self._calculate_distance(thumb_tip, index_tip)
         norm_pinch = pinch_dist / (hand_size + 1e-6)
@@ -115,19 +123,31 @@ class GestureEngine:
         out_x = index_tip.x
         out_y = index_tip.y
         
+        # 1. Closed Fist: no fingers extended
         if not index_up and not middle_up and not ring_up and not pinky_up:
             gesture = "Closed Fist"
+            
+        # 2. Open Palm: all 4 fingers extended
         elif index_up and middle_up and ring_up and pinky_up:
             gesture = "Open Palm"
-        elif index_up and middle_up and not ring_up and not pinky_up:
-            gesture = "Two Fingers"
-            # For finger-only scrolling, use relative distance from wrist to fingertips
-            avg_finger_y = (index_tip.y + middle_tip.y) / 2.0
-            out_y = avg_finger_y - wrist.y
-        elif pinch_dist < 0.05 or norm_pinch < 0.25:
+            
+        # 3. Pinch Click: thumb tip and index tip close together
+        elif norm_pinch < 0.22:
             gesture = "Pinch"
-        elif index_up and not middle_up and not ring_up and not pinky_up:
+            out_x = (index_tip.x + thumb_tip.x) / 2.0
+            out_y = (index_tip.y + thumb_tip.y) / 2.0
+            
+        # 4. Two Fingers Scroll: index and middle extended, ring/pinky not both extended
+        elif index_up and middle_up and not (ring_up and pinky_up):
+            gesture = "Two Fingers"
+            out_y = (index_tip.y + middle_tip.y) / 2.0
+            out_x = (index_tip.x + middle_tip.x) / 2.0
+            
+        # 5. Index Extended (Move cursor): index extended, middle not extended, not pinching
+        elif index_up and not middle_up:
             gesture = "Index Extended"
+            out_x = index_tip.x
+            out_y = index_tip.y
 
         return gesture, out_x, out_y, norm_pinch
 

@@ -6,7 +6,7 @@ from typing import Dict, Any
 pyautogui.FAILSAFE = True
 
 class PCController:
-    def __init__(self, smoothing_factor: float = 0.5, margin_x: float = 0.15, margin_y: float = 0.15, zoom_callback=None):
+    def __init__(self, smoothing_factor: float = 0.6, margin_x: float = 0.15, margin_y: float = 0.15, zoom_callback=None):
         self.is_enabled = False
         self.screen_width, self.screen_height = pyautogui.size()
         self.zoom_callback = zoom_callback
@@ -128,7 +128,10 @@ class PCController:
     def _click(self):
         current_time = time.time()
         if current_time - self.last_click_time > self.click_cooldown:
-            pyautogui.click(_pause=False)
+            try:
+                pyautogui.click(_pause=False)
+            except Exception:
+                pass
             self.last_click_time = current_time
 
     def _scroll(self, y_norm: float):
@@ -147,19 +150,23 @@ class PCController:
                 # scroll direction: delta positive means hand moved down screen (y increases)
                 # Usually hand down -> scroll down -> pyautogui.scroll negative
                 scroll_amount = -150 if delta > 0 else 150
-                pyautogui.scroll(scroll_amount)
+                try:
+                    pyautogui.scroll(scroll_amount)
+                except Exception:
+                    pass
                 
                 # Update reference so you have to move again to scroll more
                 self.scroll_ref_y = y_norm
                 self.last_scroll_time = current_time
 
     def scroll_direction(self, direction: str):
-        if not self.is_enabled:
-            return
-        if direction == "up":
-            pyautogui.scroll(200)
-        elif direction == "down":
-            pyautogui.scroll(-200)
+        try:
+            if direction == "up":
+                pyautogui.scroll(200)
+            elif direction == "down":
+                pyautogui.scroll(-200)
+        except Exception:
+            pass
 
     def _handle_zoom(self, pinch_dist: float):
         if self.zoom_ref_dist is None:
@@ -178,18 +185,19 @@ class PCController:
                 self.last_zoom_time = current_time
 
     def zoom_action(self, direction: str):
-        if not self.is_enabled:
-            return
-        if direction == "in":
-            print("[PCController] Zoom In")
-            pyautogui.hotkey('ctrl', '+')
-            if self.zoom_callback:
-                self.zoom_callback("Zoom In")
-        elif direction == "out":
-            print("[PCController] Zoom Out")
-            pyautogui.hotkey('ctrl', '-')
-            if self.zoom_callback:
-                self.zoom_callback("Zoom Out")
+        try:
+            if direction == "in":
+                print("[PCController] Zoom In")
+                pyautogui.hotkey('ctrl', '+')
+                if self.zoom_callback:
+                    self.zoom_callback("Zoom In")
+            elif direction == "out":
+                print("[PCController] Zoom Out")
+                pyautogui.hotkey('ctrl', '-')
+                if self.zoom_callback:
+                    self.zoom_callback("Zoom Out")
+        except Exception:
+            pass
 
     # Voice Command Actions
     def browser_open(self, target: str):

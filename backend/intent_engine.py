@@ -22,7 +22,7 @@ class IntentEngine:
         def on_zoom(action):
             self.event_manager.trigger_event("zoom_status", {"action": action})
             
-        self.pc_controller = PCController(smoothing_factor=0.3, zoom_callback=on_zoom)
+        self.pc_controller = PCController(smoothing_factor=0.6, zoom_callback=on_zoom)
         
         self.event_manager.add_subscriber(self._on_event)
 
@@ -85,11 +85,11 @@ class IntentEngine:
                     elif action == "start": self.start()
                     elif action == "enable_zoom": self.enable_zoom()
                     elif action == "disable_zoom": self.disable_zoom()
-                    elif action == "zoom_in": self.pc_controller.zoom_action("in")
-                    elif action == "zoom_out": self.pc_controller.zoom_action("out")
+                    elif action == "zoom_in" and self.pc_controller: self.pc_controller.zoom_action("in")
+                    elif action == "zoom_out" and self.pc_controller: self.pc_controller.zoom_action("out")
                     # Voice enable/disable handled externally or via API
                     
-                elif self.pc_controller and self.pc_controller.is_enabled:
+                elif self.pc_controller:
                     if intent == "browser_search":
                         self.pc_controller.browser_search(params.get("engine", "default"), params.get("query", ""))
                     elif intent == "browser_open":
@@ -216,13 +216,21 @@ class IntentEngine:
 
     def get_supported_commands(self):
         return [
-            "start control",
-            "pause control",
-            "resume control",
-            "stop control",
-            "scroll up",
-            "scroll down",
-            "zoom in",
-            "zoom out",
-            "stop zoom"
+            "start / start control",
+            "pause / pause control",
+            "resume / resume control",
+            "stop / emergency stop",
+            "open google / youtube / chrome / gmail",
+            "search for [query]",
+            "google [query]",
+            "search youtube for [query]",
+            "click / left click / right click / double click",
+            "scroll up / scroll down",
+            "scroll to top / scroll to bottom",
+            "press enter / escape / tab / backspace",
+            "type [text] / write [text]",
+            "select all / copy / paste / undo / redo",
+            "minimize window / maximize window / switch window",
+            "new tab / close tab / next tab / previous tab",
+            "enable zoom / disable zoom / zoom in / zoom out"
         ]
